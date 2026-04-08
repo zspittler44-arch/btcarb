@@ -14,7 +14,16 @@ let _memStore = {
   ],
   learningData: [],
   priceHistory: [],
-  apiKeys: { coingecko: "", kalshi: "", polymarket: "", gemini1: "", gemini2: "", gemini3: "", gemini4: "", twilio: "" },
+  apiKeys: {
+    coingecko:  (typeof import.meta !== "undefined" && import.meta.env?.VITE_COINGECKO_KEY)  || "",
+    kalshi:     (typeof import.meta !== "undefined" && import.meta.env?.VITE_KALSHI_KEY)     || "",
+    polymarket: (typeof import.meta !== "undefined" && import.meta.env?.VITE_POLYMARKET_KEY) || "0x06dA55918eE9fe5174Bc2028f7C1A23F0D26a61e",
+    gemini1:    (typeof import.meta !== "undefined" && import.meta.env?.VITE_GEMINI_KEY_1)   || "",
+    gemini2:    (typeof import.meta !== "undefined" && import.meta.env?.VITE_GEMINI_KEY_2)   || "",
+    gemini3:    (typeof import.meta !== "undefined" && import.meta.env?.VITE_GEMINI_KEY_3)   || "",
+    gemini4:    (typeof import.meta !== "undefined" && import.meta.env?.VITE_GEMINI_KEY_4)   || "",
+    twilio:     (typeof import.meta !== "undefined" && import.meta.env?.VITE_TWILIO_KEY)     || "",
+  },
   settings: { demoMode: true, demoScenario: "hot_arb", refreshInterval: 30 },
 };
 
