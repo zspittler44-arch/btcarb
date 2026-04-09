@@ -24,7 +24,7 @@ let _memStore = {
     gemini4:    (typeof import.meta !== "undefined" && import.meta.env?.VITE_GEMINI_KEY_4)   || "",
     twilio:     (typeof import.meta !== "undefined" && import.meta.env?.VITE_TWILIO_KEY)     || "",
   },
-  settings: { demoMode: true, demoScenario: "hot_arb", refreshInterval: 30 },
+  settings: { demoMode: false, demoScenario: "hot_arb", refreshInterval: 30 },
 };
 
 // ═══════════════════════════════════════════════════════════════════════════
