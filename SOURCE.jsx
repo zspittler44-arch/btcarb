@@ -985,6 +985,24 @@ export default function App() {
     setMemory(m => ({ ...m, settings: { ...m.settings, demoMode, demoScenario } }));
   }, [demoMode, demoScenario, setMemory]);
 
+  // Auto-run agents every 5 minutes, staggered 30s apart
+  useEffect(() => {
+    const AGENTS = ["atlas", "nova", "rex", "sage"];
+    const INTERVAL = 5 * 60 * 1000; // 5 minutes
+    const STAGGER = 30 * 1000;       // 30 seconds between each
+    // Run immediately on mount (staggered), then on interval
+    const timeouts = AGENTS.map((name, i) =>
+      setTimeout(() => runAgent(name), i * STAGGER)
+    );
+    const intervals = AGENTS.map((name, i) =>
+      setInterval(() => runAgent(name), INTERVAL + i * STAGGER)
+    );
+    return () => {
+      timeouts.forEach(clearTimeout);
+      intervals.forEach(clearInterval);
+    };
+  }, [runAgent]);
+
   // Auto-alert on large arb opportunities
   useEffect(() => {
     const bigArbs = kalshiMarkets.filter(m => (m.spread || 0) >= 0.04);
