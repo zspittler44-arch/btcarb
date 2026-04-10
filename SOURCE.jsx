@@ -294,6 +294,31 @@ function useAgents(memory, apiKeys, btcPrice) {
     return parsed;
   }, [apiKeys, btcPrice, memory, callGemini]);
 
+  // Auto-run all agents on mount and every 5 minutes
+  const agentsRef = useRef({ runAgent, apiKeys, btcPrice });
+  useEffect(() => { agentsRef.current = { runAgent, apiKeys, btcPrice }; }, [runAgent, apiKeys, btcPrice]);
+
+  useEffect(() => {
+    const names = ["atlas", "nova", "rex", "sage"];
+
+    const runAll = () => {
+      const { runAgent, apiKeys } = agentsRef.current;
+      // Only auto-run if at least one Gemini key is configured
+      const hasKey = names.some((n, i) => apiKeys?.[`gemini${i + 1}`]);
+      if (!hasKey) return;
+      names.forEach((name, i) => {
+        setTimeout(() => runAgent(name), i * 4000); // stagger 4s apart
+      });
+    };
+
+    // First run after 5s (gives key-load time to settle)
+    const initial = setTimeout(runAll, 5000);
+    // Then every 5 minutes
+    const interval = setInterval(runAll, 5 * 60 * 1000);
+
+    return () => { clearTimeout(initial); clearInterval(interval); };
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   return { agentStates, runAgent };
 }
 
