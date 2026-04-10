@@ -54,6 +54,19 @@ class ErrorBoundary extends React.Component {
 function useSystemMemory() {
   const [memory, setMemoryState] = useState({ ..._memStore });
 
+  // Load persisted API keys from backend on first mount
+  useEffect(() => {
+    fetch("http://localhost:5001/btcarb/config")
+      .then(r => r.json())
+      .then(saved => {
+        if (saved && typeof saved === "object" && Object.keys(saved).length > 0) {
+          _memStore.apiKeys = { ..._memStore.apiKeys, ...saved };
+          setMemoryState(prev => ({ ...prev, apiKeys: { ...prev.apiKeys, ...saved } }));
+        }
+      })
+      .catch(() => {}); // backend not running — fail silently
+  }, []);
+
   const setMemory = useCallback((updater) => {
     setMemoryState(prev => {
       const next = typeof updater === "function" ? updater(prev) : { ...prev, ...updater };
@@ -134,27 +147,25 @@ function useLivePrices(apiKeys, demoMode, demoScenario) {
     }
   }, [demoMode, getDemoPrice]);
 
-  // Kalshi fetch (needs API key)
+  // Kalshi fetch — proxied through local backend to avoid CORS
   const fetchKalshi = useCallback(async () => {
     if (demoMode) { setKalshiMarkets(getDemoMarkets()); setConnectionStatus(s => ({ ...s, kalshi: "demo" })); return; }
-    if (!apiKeys?.kalshi) { setConnectionStatus(s => ({ ...s, kalshi: "no_key" })); return; }
     try {
-      const res = await fetch("https://trading-api.kalshi.com/trade-api/v2/markets?limit=20&status=open&series_ticker=KXBTC", {
-        headers: { Authorization: `Bearer ${apiKeys.kalshi}`, "Content-Type": "application/json" },
-      });
-      if (!res.ok) throw new Error(`Kalshi ${res.status}`);
+      const res = await fetch("http://localhost:5001/btcarb/kalshi");
+      if (!res.ok) throw new Error(`proxy ${res.status}`);
       const d = await res.json();
+      if (d.error === "no_key") { setConnectionStatus(s => ({ ...s, kalshi: "no_key" })); return; }
       const markets = (d.markets || []).map(m => ({
-        id: m.ticker, title: m.title,
-        kalshi: m.last_price / 100,
-        poly: null, spread: null, vol: m.volume,
+        id: m.id, title: m.title,
+        kalshi: m.kalshi,
+        poly: null, spread: null, vol: m.vol,
       }));
       setKalshiMarkets(markets);
-      setConnectionStatus(s => ({ ...s, kalshi: "live" }));
+      setConnectionStatus(s => ({ ...s, kalshi: markets.length > 0 ? "live" : "error" }));
     } catch (e) {
       setConnectionStatus(s => ({ ...s, kalshi: "error" }));
     }
-  }, [demoMode, getDemoMarkets, apiKeys?.kalshi]);
+  }, [demoMode, getDemoMarkets]);
 
   // Polymarket CLOB fetch (needs key for some endpoints)
   const fetchPolymarket = useCallback(async () => {
@@ -335,6 +346,56 @@ const StatusDot = ({ status }) => (
 );
 
 // ═══════════════════════════════════════════════════════════════════════════
+// ALPACA POSITIONS PANEL — real brokerage open positions
+// ═══════════════════════════════════════════════════════════════════════════
+function AlpacaPositionsPanel() {
+  const [alpacaPos, setAlpacaPos] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState(null);
+
+  const fetchPositions = useCallback(() => {
+    fetch("http://localhost:5001/btcarb/positions")
+      .then(r => r.json())
+      .then(data => { setAlpacaPos(data.positions || []); setLoading(false); setErr(null); })
+      .catch(e => { setErr("Backend offline"); setLoading(false); });
+  }, []);
+
+  useEffect(() => {
+    fetchPositions();
+    const t = setInterval(fetchPositions, 30000);
+    return () => clearInterval(t);
+  }, [fetchPositions]);
+
+  return (
+    <div>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 8 }}>
+        <span className="text-gray-300 font-semibold text-sm">OPEN POSITIONS — ALPACA</span>
+        {!loading && !err && <span className="text-gray-600 text-xs">({alpacaPos.length})</span>}
+        <button onClick={fetchPositions} className="text-gray-600 text-xs ml-auto hover:text-gray-300">↻ refresh</button>
+      </div>
+      {loading && <div className="text-gray-600 text-xs py-2">Loading from Alpaca…</div>}
+      {err && <div className="text-red-500 text-xs py-2">{err} — start scanner_backend.py</div>}
+      {!loading && !err && alpacaPos.length === 0 && (
+        <div className="bg-gray-800 border border-gray-700 rounded p-3 text-gray-500 text-sm text-center">No Alpaca positions</div>
+      )}
+      {alpacaPos.map((p, i) => (
+        <div key={i} className="bg-gray-800 border border-gray-700 rounded p-3 mb-2 flex items-center justify-between">
+          <div>
+            <div className="text-gray-200 text-sm font-medium">{p.symbol}</div>
+            <div className="text-gray-400 text-xs">{p.qty} shares · avg ${Number(p.avg_entry).toFixed(2)} · now ${Number(p.current).toFixed(2)}</div>
+            <div className="text-gray-500 text-xs">Market val ${Number(p.market_val).toFixed(2)}</div>
+          </div>
+          <div className={`text-sm font-bold ${p.pnl >= 0 ? "text-green-400" : "text-red-400"}`}>
+            {p.pnl >= 0 ? "+" : ""}${Number(p.pnl).toFixed(2)}
+            <div className="text-xs font-normal">{p.pnl_pct >= 0 ? "+" : ""}{Number(p.pnl_pct).toFixed(2)}%</div>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // FRONT OFFICE
 // ═══════════════════════════════════════════════════════════════════════════
 function FrontOffice({ btc, kalshiMarkets, positions, alerts, agentStates, runAgent, connectionStatus, onSignal, onTradeClosed, memory }) {
@@ -444,9 +505,9 @@ function FrontOffice({ btc, kalshiMarkets, positions, alerts, agentStates, runAg
         </div>
       </div>
 
-      {/* Open Positions */}
+      {/* Open Positions — Prediction Markets */}
       <div>
-        <div className={S.sectionTitle}>OPEN POSITIONS ({positions.length})</div>
+        <div className={S.sectionTitle}>OPEN POSITIONS — PREDICTION MARKETS ({positions.length})</div>
         {positions.length === 0 ? (
           <div className={`${S.card} text-gray-500 text-sm text-center py-6`}>No open positions</div>
         ) : positions.map(p => (
@@ -461,6 +522,9 @@ function FrontOffice({ btc, kalshiMarkets, positions, alerts, agentStates, runAg
           </div>
         ))}
       </div>
+
+      {/* Open Positions — Alpaca (real brokerage) */}
+      <AlpacaPositionsPanel />
 
       {/* Recent Signals */}
       <div>
@@ -800,6 +864,12 @@ function SetupTab({ memory, setMemory }) {
 
   const save = () => {
     setMemory(m => ({ ...m, apiKeys: keys }));
+    // Persist keys to backend so they survive page refreshes
+    fetch("http://localhost:5001/btcarb/config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(keys),
+    }).catch(() => {});
     setSaved(true);
     setTimeout(() => setSaved(false), 2000);
   };
