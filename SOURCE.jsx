@@ -257,9 +257,29 @@ function useAgents(memory, apiKeys, btcPrice) {
     sage:  { status: "idle", lastSignal: null, confidence: 0, task: "Risk Management" },
   });
 
-  const callGemini = useCallback(async (agentName, apiKey, prompt) => {
+  // Model assigned per agent for Groq — different models for performance comparison
+  const GROQ_MODELS = {
+    atlas: "llama-3.3-70b-versatile",   // deepest reasoning for market structure
+    nova:  "mixtral-8x7b-32768",        // different architecture for sentiment
+    rex:   "llama-3.1-8b-instant",      // fastest for arb/directional calls
+    sage:  "llama-3.3-70b-versatile",   // risk math needs depth
+  };
+
+  const callAI = useCallback(async (agentName, apiKey, prompt) => {
     if (!apiKey) return null;
     try {
+      // Groq keys start with gsk_ — use OpenAI-compatible endpoint
+      if (apiKey.startsWith("gsk_")) {
+        const model = GROQ_MODELS[agentName] || "llama-3.1-8b-instant";
+        const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "Authorization": `Bearer ${apiKey}` },
+          body: JSON.stringify({ model, messages: [{ role: "user", content: prompt }], max_tokens: 150 }),
+        });
+        const d = await res.json();
+        return d.choices?.[0]?.message?.content || null;
+      }
+      // Fallback: Gemini (AIza... keys)
       const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -291,7 +311,7 @@ function useAgents(memory, apiKeys, btcPrice) {
       rex:   `BTC price: $${btcPrice?.usd?.toFixed(0) || "N/A"}. ${microSummary} Scan for prediction market arbitrage between Kalshi and Polymarket AND flag if microstructure signals a 5-min directional move. 1 sentence, confidence 0-100.`,
       sage:  `Portfolio has ${memory?.trades?.filter(t=>t.status==="open")?.length || 0} open positions. BTC $${btcPrice?.usd?.toFixed(0) || "N/A"}. ${microSummary} Give risk assessment and max safe position size. 1 sentence, confidence 0-100.`,
     };
-    const result = await callGemini(name, key, prompts[name]);
+    const result = await callAI(name, key, prompts[name]);
     const demoSignals = {
       atlas: { signal: "BTC holding key $65K support — structure bullish above $66.5K.", confidence: 74 },
       nova:  { signal: "Social sentiment turning positive, fear index dropping from 42 → 38.", confidence: 61 },
@@ -316,7 +336,7 @@ function useAgents(memory, apiKeys, btcPrice) {
     }
     setTimeout(() => setAgentStates(s => ({ ...s, [name]: { ...s[name], status: "idle" } })), 5000);
     return parsed;
-  }, [apiKeys, btcPrice, memory, callGemini]);
+  }, [apiKeys, btcPrice, memory, callAI]);
 
   // Auto-run all agents on mount and every 5 minutes
   const agentsRef = useRef({ runAgent, apiKeys, btcPrice });
@@ -327,7 +347,7 @@ function useAgents(memory, apiKeys, btcPrice) {
 
     const runAll = () => {
       const { runAgent, apiKeys } = agentsRef.current;
-      // Only auto-run if at least one Gemini key is configured
+      // Only auto-run if at least one AI key is configured (Groq gsk_... or Gemini AIza...)
       const hasKey = names.some((n, i) => apiKeys?.[`gemini${i + 1}`]);
       if (!hasKey) return;
       names.forEach((name, i) => {
@@ -1008,10 +1028,10 @@ function SetupTab({ memory, setMemory }) {
     { key: "coingecko", label: "CoinGecko API Key", hint: "Free tier works without a key", placeholder: "Optional — leave blank for free tier" },
     { key: "kalshi", label: "Kalshi API Key", hint: "trading-api.kalshi.com → Account → API", placeholder: "KALSHI_..." },
     { key: "polymarket", label: "Polymarket CLOB Key", hint: "polymarket.com → Profile → API Keys", placeholder: "0x..." },
-    { key: "gemini1", label: "Gemini Key — Atlas", hint: "aistudio.google.com/app/apikey (free)", placeholder: "AIza..." },
-    { key: "gemini2", label: "Gemini Key — Nova", hint: "aistudio.google.com/app/apikey (free)", placeholder: "AIza..." },
-    { key: "gemini3", label: "Gemini Key — Rex", hint: "aistudio.google.com/app/apikey (free)", placeholder: "AIza..." },
-    { key: "gemini4", label: "Gemini Key — Sage", hint: "aistudio.google.com/app/apikey (free)", placeholder: "AIza..." },
+    { key: "gemini1", label: "AI Key — Atlas", hint: "Groq: console.groq.com → Create API Key (free, llama-3.3-70b)", placeholder: "gsk_..." },
+    { key: "gemini2", label: "AI Key — Nova", hint: "Groq: console.groq.com → Create API Key (free, mixtral-8x7b)", placeholder: "gsk_..." },
+    { key: "gemini3", label: "AI Key — Rex", hint: "Groq: console.groq.com → Create API Key (free, llama-3.1-8b)", placeholder: "gsk_..." },
+    { key: "gemini4", label: "AI Key — Sage", hint: "Groq: console.groq.com → Create API Key (free, llama-3.3-70b)", placeholder: "gsk_..." },
     { key: "twilio", label: "Twilio Auth Token", hint: "console.twilio.com → Account → API Keys", placeholder: "AC..." },
   ];
 
