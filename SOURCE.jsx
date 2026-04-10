@@ -253,7 +253,7 @@ function useAgents(memory, apiKeys, btcPrice) {
   const [agentStates, setAgentStates] = useState({
     atlas: { status: "idle", lastSignal: null, confidence: 0, task: "Market Structure" },
     nova:  { status: "idle", lastSignal: null, confidence: 0, task: "Sentiment Analysis" },
-    rex:   { status: "idle", lastSignal: null, confidence: 0, task: "Arbitrage Scanner" },
+    rex:   { status: "idle", lastSignal: null, confidence: 0, task: "5-Min Direction Predictor" },
     sage:  { status: "idle", lastSignal: null, confidence: 0, task: "Risk Management" },
   });
 
@@ -308,7 +308,7 @@ function useAgents(memory, apiKeys, btcPrice) {
     const prompts = {
       atlas: `BTC price: $${btcPrice?.usd?.toFixed(0) || "N/A"}. ${microSummary} Analyze market structure and 4h trend. Give a 1-sentence directional signal with confidence 0-100.`,
       nova:  `BTC at $${btcPrice?.usd?.toFixed(0) || "N/A"}, 24h change ${btcPrice?.change24h?.toFixed(2) || "0"}%. ${microSummary} Analyze current sentiment and flow signals. Give 1-sentence signal with confidence 0-100.`,
-      rex:   `BTC price: $${btcPrice?.usd?.toFixed(0) || "N/A"}. ${microSummary} Scan for prediction market arbitrage between Kalshi and Polymarket AND flag if microstructure signals a 5-min directional move. 1 sentence, confidence 0-100.`,
+      rex:   `You are Rex, a BTC 5-minute price direction predictor. Current data: BTC $${btcPrice?.usd?.toFixed(0) || "N/A"}. ${microSummary} Based ONLY on these microstructure signals, will BTC be HIGHER or LOWER in exactly 5 minutes? You MUST commit to UP or DOWN unless signals are completely flat. Respond in EXACTLY this format with no other text:\nDIRECTION: [UP or DOWN or NEUTRAL]\nCONFIDENCE: [0-100]\nREASON: [10 words max]`,
       sage:  `Portfolio has ${memory?.trades?.filter(t=>t.status==="open")?.length || 0} open positions. BTC $${btcPrice?.usd?.toFixed(0) || "N/A"}. ${microSummary} Give risk assessment and max safe position size. 1 sentence, confidence 0-100.`,
     };
     const result = await callAI(name, key, prompts[name]);
@@ -318,9 +318,23 @@ function useAgents(memory, apiKeys, btcPrice) {
       rex:   { signal: "3.8% spread on BTC-70K-EOY between Kalshi (62%) and Polymarket (58%).", confidence: 82 },
       sage:  { signal: "Portfolio risk nominal. Max recommended exposure: $850 at current vol.", confidence: 88 },
     };
-    const parsed = result
-      ? { signal: result.substring(0, 120), confidence: Math.floor(Math.random() * 30) + 60 }
-      : demoSignals[name];
+    let parsed;
+    if (result) {
+      // For Rex: parse structured DIRECTION/CONFIDENCE/REASON format
+      const dirMatch = result.match(/DIRECTION:\s*(UP|DOWN|NEUTRAL)/i);
+      const confMatch = result.match(/CONFIDENCE:\s*(\d+)/i);
+      const reasonMatch = result.match(/REASON:\s*(.+)/i);
+      if (name === "rex" && dirMatch) {
+        const direction = dirMatch[1].toUpperCase();
+        const confidence = confMatch ? parseInt(confMatch[1]) : Math.floor(Math.random() * 30) + 60;
+        const reason = reasonMatch ? reasonMatch[1].trim() : result.substring(0, 80);
+        parsed = { signal: `${direction} — ${reason}`, confidence };
+      } else {
+        parsed = { signal: result.substring(0, 120), confidence: Math.floor(Math.random() * 30) + 60 };
+      }
+    } else {
+      parsed = demoSignals[name];
+    }
     setAgentStates(s => ({ ...s, [name]: { ...s[name], status: "done", lastSignal: parsed.signal, confidence: parsed.confidence } }));
     // Rex logs every prediction so we can build win/loss data
     if (name === "rex") {
