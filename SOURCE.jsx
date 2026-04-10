@@ -167,20 +167,20 @@ function useLivePrices(apiKeys, demoMode, demoScenario) {
     }
   }, [demoMode, getDemoMarkets]);
 
-  // Polymarket CLOB fetch (needs key for some endpoints)
+  // Polymarket fetch — proxied through local backend (gamma API, no auth needed)
   const fetchPolymarket = useCallback(async () => {
     if (demoMode) { setConnectionStatus(s => ({ ...s, polymarket: "demo" })); return; }
-    if (!apiKeys?.polymarket) { setConnectionStatus(s => ({ ...s, polymarket: "no_key" })); return; }
     try {
-      const res = await fetch("https://clob.polymarket.com/markets?active=true&limit=20");
-      if (!res.ok) throw new Error(`Polymarket ${res.status}`);
+      const res = await fetch("http://localhost:5001/btcarb/polymarket");
+      if (!res.ok) throw new Error(`proxy ${res.status}`);
       const d = await res.json();
-      setPolyMarkets((d.data || []).slice(0, 10));
-      setConnectionStatus(s => ({ ...s, polymarket: "live" }));
+      if (d.error) throw new Error(d.error);
+      setPolyMarkets(d.markets || []);
+      setConnectionStatus(s => ({ ...s, polymarket: d.markets?.length > 0 ? "live" : "error" }));
     } catch (e) {
       setConnectionStatus(s => ({ ...s, polymarket: "error" }));
     }
-  }, [demoMode, apiKeys?.polymarket]);
+  }, [demoMode]);
 
   useEffect(() => {
     fetchBTC();
