@@ -302,6 +302,18 @@ function useAgents(memory, apiKeys, btcPrice) {
       ? { signal: result.substring(0, 120), confidence: Math.floor(Math.random() * 30) + 60 }
       : demoSignals[name];
     setAgentStates(s => ({ ...s, [name]: { ...s[name], status: "done", lastSignal: parsed.signal, confidence: parsed.confidence } }));
+    // Rex logs every prediction so we can build win/loss data
+    if (name === "rex") {
+      fetch("http://localhost:5001/btcarb/rex-predict", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          signal:     parsed.signal,
+          confidence: parsed.confidence,
+          price:      btcPrice?.usd || null,
+        }),
+      }).catch(() => {});
+    }
     setTimeout(() => setAgentStates(s => ({ ...s, [name]: { ...s[name], status: "idle" } })), 5000);
     return parsed;
   }, [apiKeys, btcPrice, memory, callGemini]);
