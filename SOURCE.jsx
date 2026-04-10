@@ -273,11 +273,23 @@ function useAgents(memory, apiKeys, btcPrice) {
   const runAgent = useCallback(async (name) => {
     const key = apiKeys?.[`gemini${["atlas","nova","rex","sage"].indexOf(name)+1}`];
     setAgentStates(s => ({ ...s, [name]: { ...s[name], status: "thinking" } }));
+
+    // Fetch live microstructure data for Rex and Atlas
+    let micro = null;
+    try {
+      const mr = await fetch("http://localhost:5001/btcarb/microstructure?limit=12", { signal: AbortSignal.timeout(4000) });
+      micro = await mr.json();
+    } catch (_) {}
+    const lat = micro?.latest || {};
+    const microSummary = micro
+      ? `OB imbalance:${lat.ob_imbalance ?? "n/a"} CVD:${lat.cvd_bias ?? "n/a"} Funding:${lat.funding_bias ?? "n/a"} Composite:${lat.composite ?? "n/a"} 2hr-trend:${micro.trend}.`
+      : "Microstructure: unavailable.";
+
     const prompts = {
-      atlas: `BTC price: $${btcPrice?.usd?.toFixed(0) || "N/A"}. Analyze market structure, key support/resistance levels, and 4h trend. Give a 1-sentence signal with confidence 0-100.`,
-      nova:  `BTC at $${btcPrice?.usd?.toFixed(0) || "N/A"}, 24h change ${btcPrice?.change24h?.toFixed(2) || "0"}%. Analyze current sentiment signals. Give 1-sentence signal with confidence 0-100.`,
-      rex:   `BTC price: $${btcPrice?.usd?.toFixed(0) || "N/A"}. Scan for prediction market arbitrage opportunities between Kalshi and Polymarket. Summarize best arb in 1 sentence with confidence 0-100.`,
-      sage:  `Portfolio has ${memory?.trades?.filter(t=>t.status==="open")?.length || 0} open positions. BTC at $${btcPrice?.usd?.toFixed(0) || "N/A"}. Give risk assessment in 1 sentence with confidence 0-100.`,
+      atlas: `BTC price: $${btcPrice?.usd?.toFixed(0) || "N/A"}. ${microSummary} Analyze market structure and 4h trend. Give a 1-sentence directional signal with confidence 0-100.`,
+      nova:  `BTC at $${btcPrice?.usd?.toFixed(0) || "N/A"}, 24h change ${btcPrice?.change24h?.toFixed(2) || "0"}%. ${microSummary} Analyze current sentiment and flow signals. Give 1-sentence signal with confidence 0-100.`,
+      rex:   `BTC price: $${btcPrice?.usd?.toFixed(0) || "N/A"}. ${microSummary} Scan for prediction market arbitrage between Kalshi and Polymarket AND flag if microstructure signals a 5-min directional move. 1 sentence, confidence 0-100.`,
+      sage:  `Portfolio has ${memory?.trades?.filter(t=>t.status==="open")?.length || 0} open positions. BTC $${btcPrice?.usd?.toFixed(0) || "N/A"}. ${microSummary} Give risk assessment and max safe position size. 1 sentence, confidence 0-100.`,
     };
     const result = await callGemini(name, key, prompts[name]);
     const demoSignals = {
