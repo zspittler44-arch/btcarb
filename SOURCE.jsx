@@ -980,28 +980,31 @@ export default function App() {
   const { alerts, unreadCount, addAlert, markRead, clearAlerts } = useAlerts(memory, setMemory);
   const { agentStates, runAgent } = useAgents(memory, memory.apiKeys, btc);
 
+  // Keep a stable ref to runAgent so auto-run intervals don't reset on every BTC price tick
+  const runAgentRef = useRef(runAgent);
+  useEffect(() => { runAgentRef.current = runAgent; }, [runAgent]);
+
   // Sync demo settings to memory
   useEffect(() => {
     setMemory(m => ({ ...m, settings: { ...m.settings, demoMode, demoScenario } }));
   }, [demoMode, demoScenario, setMemory]);
 
-  // Auto-run agents every 5 minutes, staggered 30s apart
+  // Auto-run agents every 5 minutes, staggered 30s apart — stable, never restarts
   useEffect(() => {
     const AGENTS = ["atlas", "nova", "rex", "sage"];
-    const INTERVAL = 5 * 60 * 1000; // 5 minutes
-    const STAGGER = 30 * 1000;       // 30 seconds between each
-    // Run immediately on mount (staggered), then on interval
+    const INTERVAL = 5 * 60 * 1000;
+    const STAGGER = 30 * 1000;
     const timeouts = AGENTS.map((name, i) =>
-      setTimeout(() => runAgent(name), i * STAGGER)
+      setTimeout(() => runAgentRef.current(name), i * STAGGER)
     );
     const intervals = AGENTS.map((name, i) =>
-      setInterval(() => runAgent(name), INTERVAL + i * STAGGER)
+      setInterval(() => runAgentRef.current(name), INTERVAL + i * STAGGER)
     );
     return () => {
       timeouts.forEach(clearTimeout);
       intervals.forEach(clearInterval);
     };
-  }, [runAgent]);
+  }, []); // empty deps — runs once, ref keeps it fresh
 
   // Auto-alert on large arb opportunities
   useEffect(() => {
