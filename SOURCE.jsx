@@ -445,6 +445,82 @@ function AlpacaPositionsPanel() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// REX PREDICTION PANEL — live win/loss stats + Excel download link
+// ═══════════════════════════════════════════════════════════════════════════
+function RexPredictionPanel() {
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  const fetch_ = useCallback(() => {
+    fetch("http://localhost:5001/btcarb/rex-predictions")
+      .then(r => r.json())
+      .then(d => { setData(d); setLoading(false); })
+      .catch(() => setLoading(false));
+  }, []);
+
+  useEffect(() => { fetch_(); const t = setInterval(fetch_, 30000); return () => clearInterval(t); }, [fetch_]);
+
+  const recent = (data?.predictions || []).filter(p => p.outcome).slice(-5).reverse();
+  const winRate = data?.win_rate;
+  const winColor = winRate >= 55 ? "text-green-400" : winRate < 50 ? "text-red-400" : "text-yellow-400";
+
+  return (
+    <div className={S.card} style={{ height: "100%" }}>
+      <div className="flex items-center justify-between mb-3">
+        <div className="text-gray-300 font-semibold text-sm">REX PREDICTIONS</div>
+        <a href="http://localhost:5001/btcarb/rex-report" target="_blank" rel="noreferrer"
+           className="text-xs bg-gray-800 hover:bg-gray-700 text-blue-400 px-2 py-1 rounded transition-colors">
+          ↓ Excel
+        </a>
+      </div>
+
+      {loading && <div className="text-gray-600 text-xs py-2">Loading...</div>}
+
+      {!loading && data && (
+        <>
+          {/* Win rate summary */}
+          <div className="grid grid-cols-3 gap-1 mb-3">
+            {[
+              { label: "Win Rate", value: winRate != null ? `${winRate}%` : "—", cls: winColor },
+              { label: "Wins",     value: data.wins   ?? "—", cls: "text-green-400" },
+              { label: "Losses",   value: data.losses ?? "—", cls: "text-red-400"   },
+            ].map(({ label, value, cls }) => (
+              <div key={label} className="bg-gray-800 rounded p-2 text-center">
+                <div className={`font-bold text-sm ${cls}`}>{value}</div>
+                <div className="text-gray-500 text-xs">{label}</div>
+              </div>
+            ))}
+          </div>
+
+          {/* Recent resolved calls */}
+          {recent.length === 0 ? (
+            <div className="text-gray-600 text-xs text-center py-2">
+              {data.total > 0 ? "Awaiting first resolution (5 min)…" : "No predictions yet — click Rex › Run"}
+            </div>
+          ) : recent.map((p, i) => (
+            <div key={i} className="flex items-center justify-between mb-1 text-xs">
+              <span className={`font-bold w-10 ${p.call === "UP" ? "text-green-400" : "text-red-400"}`}>
+                {p.call === "UP" ? "▲ UP" : "▼ DN"}
+              </span>
+              <span className="text-gray-500 flex-1 mx-1 truncate">${p.price_at_call?.toLocaleString()}</span>
+              <span className={`font-bold px-1 rounded ${p.outcome === "WIN" ? "bg-green-900 text-green-400" : "bg-red-900 text-red-400"}`}>
+                {p.outcome}
+              </span>
+            </div>
+          ))}
+
+          <div className="text-gray-700 text-xs mt-2 text-right">{data.total} total · {data.resolved} resolved</div>
+        </>
+      )}
+
+      {!loading && !data && (
+        <div className="text-red-500 text-xs py-2">Backend offline — start scanner_backend.py</div>
+      )}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // FRONT OFFICE
 // ═══════════════════════════════════════════════════════════════════════════
 function FrontOffice({ btc, kalshiMarkets, positions, alerts, agentStates, runAgent, connectionStatus, onSignal, onTradeClosed, memory }) {
@@ -497,21 +573,7 @@ function FrontOffice({ btc, kalshiMarkets, positions, alerts, agentStates, runAg
           </ResponsiveContainer>
         </div>
 
-        <div className={S.card}>
-          <div className={S.label}>ARB OPPORTUNITIES</div>
-          {arbOpps.length === 0 ? (
-            <div className="text-gray-500 text-xs py-4 text-center">No arb &gt;3% found</div>
-          ) : arbOpps.map(m => (
-            <div key={m.id} className="mb-3 border-b border-gray-800 pb-3 last:border-0 last:pb-0">
-              <div className="text-gray-200 text-xs font-medium mb-1 truncate">{m.title}</div>
-              <div className="flex justify-between text-xs">
-                <span className="text-blue-400">K: {(m.kalshi * 100).toFixed(0)}¢</span>
-                <span className="text-purple-400">P: {(m.poly * 100).toFixed(0)}¢</span>
-                <span className="text-green-400 font-bold">{(m.spread * 100).toFixed(1)}%</span>
-              </div>
-            </div>
-          ))}
-        </div>
+        <RexPredictionPanel />
       </div>
 
       {/* AI Agents */}
@@ -574,6 +636,25 @@ function FrontOffice({ btc, kalshiMarkets, positions, alerts, agentStates, runAg
 
       {/* Open Positions — Alpaca (real brokerage) */}
       <AlpacaPositionsPanel />
+
+      {/* ARB OPPORTUNITIES */}
+      <div>
+        <div className={S.sectionTitle}>ARB OPPORTUNITIES</div>
+        {arbOpps.length === 0 ? (
+          <div className={`${S.card} text-gray-500 text-sm text-center py-4`}>No arb &gt;3% found</div>
+        ) : arbOpps.map(m => (
+          <div key={m.id} className={`${S.card} mb-2 flex items-center justify-between`}>
+            <div className="flex-1 min-w-0 mr-3">
+              <div className="text-gray-200 text-sm font-medium truncate">{m.title}</div>
+              <div className="flex gap-3 text-xs mt-1">
+                <span className="text-blue-400">Kalshi: {(m.kalshi * 100).toFixed(0)}¢</span>
+                <span className="text-purple-400">Poly: {(m.poly * 100).toFixed(0)}¢</span>
+              </div>
+            </div>
+            <div className="text-green-400 font-bold text-sm">{(m.spread * 100).toFixed(1)}% spread</div>
+          </div>
+        ))}
+      </div>
 
       {/* Recent Signals */}
       <div>
