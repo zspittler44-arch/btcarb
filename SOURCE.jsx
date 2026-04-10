@@ -261,7 +261,7 @@ function useAgents(memory, apiKeys, btcPrice) {
   const GROQ_MODELS = {
     atlas: "llama-3.3-70b-versatile",   // deepest reasoning for market structure
     nova:  "mixtral-8x7b-32768",        // different architecture for sentiment
-    rex:   "llama-3.1-8b-instant",      // fastest for arb/directional calls
+    rex:   "llama-3.3-70b-versatile",   // needs 70B to follow structured format reliably
     sage:  "llama-3.3-70b-versatile",   // risk math needs depth
   };
 
@@ -308,7 +308,7 @@ function useAgents(memory, apiKeys, btcPrice) {
     const prompts = {
       atlas: `BTC price: $${btcPrice?.usd?.toFixed(0) || "N/A"}. ${microSummary} Analyze market structure and 4h trend. Give a 1-sentence directional signal with confidence 0-100.`,
       nova:  `BTC at $${btcPrice?.usd?.toFixed(0) || "N/A"}, 24h change ${btcPrice?.change24h?.toFixed(2) || "0"}%. ${microSummary} Analyze current sentiment and flow signals. Give 1-sentence signal with confidence 0-100.`,
-      rex:   `You are Rex, a BTC 5-minute price direction predictor. Current data: BTC $${btcPrice?.usd?.toFixed(0) || "N/A"}. ${microSummary} Based ONLY on these microstructure signals, will BTC be HIGHER or LOWER in exactly 5 minutes? You MUST commit to UP or DOWN unless signals are completely flat. Respond in EXACTLY this format with no other text:\nDIRECTION: [UP or DOWN or NEUTRAL]\nCONFIDENCE: [0-100]\nREASON: [10 words max]`,
+      rex:   `You are Rex. Your ONLY job is predicting BTC price direction for the next 5 minutes.\n\nDATA: BTC $${btcPrice?.usd?.toFixed(0) || "N/A"}. ${microSummary}\n\nRules:\n- Respond in EXACTLY this 3-line format, nothing else\n- NEUTRAL only if signals are completely contradictory\n- Do NOT mention Kalshi, Polymarket, or arbitrage\n\nExample output:\nDIRECTION: UP\nCONFIDENCE: 72\nREASON: OB imbalance bullish, CVD trending up`,
       sage:  `Portfolio has ${memory?.trades?.filter(t=>t.status==="open")?.length || 0} open positions. BTC $${btcPrice?.usd?.toFixed(0) || "N/A"}. ${microSummary} Give risk assessment and max safe position size. 1 sentence, confidence 0-100.`,
     };
     const result = await callAI(name, key, prompts[name]);
