@@ -314,6 +314,30 @@ function useAgents(memory, apiKeys, btcPrice) {
     let rexLessons = "No historical data yet — default to NEUTRAL when signals are weak.";
     let serverCooldownActive = false;
     let serverCooldownMinutes = 0;
+
+    // ── Hoisted signal variables (needed by prompts for all agents) ──────
+    const takerRatios = snapshots.map(s => s.taker_buy_ratio).filter(v => v != null);
+    const avgTakerBuy = takerRatios.length ? takerRatios.reduce((a,b)=>a+b,0)/takerRatios.length : null;
+    const lsRatios = snapshots.map(s => s.long_short_ratio).filter(v => v != null);
+    const avgLS    = lsRatios.length ? lsRatios.reduce((a,b)=>a+b,0)/lsRatios.length : null;
+    const basisVals = snapshots.map(s => s.basis_pct).filter(v => v != null);
+    const avgBasis  = basisVals.length ? basisVals.reduce((a,b)=>a+b,0)/basisVals.length : null;
+    const momVals = snapshots.map(s => s.hourly_momentum).filter(v => v != null);
+    const avgMom  = momVals.length ? momVals.reduce((a,b)=>a+b,0)/momVals.length : null;
+    const fngVals = snapshots.map(s => s.fear_greed).filter(v => v != null);
+    const latestFG = fngVals.length ? fngVals[fngVals.length-1] : null;
+    const oiDeltas   = snapshots.map(s => s.oi_delta_pct).filter(v => v != null);
+    const avgOiDelta = oiDeltas.length ? oiDeltas.reduce((a,b)=>a+b,0)/oiDeltas.length : 0;
+    const oiGrowing  = avgOiDelta >  0.3;
+    const oiShrinking = avgOiDelta < -0.3;
+    const liqBiases      = snapshots.map(s => s.liq_bias).filter(v => v != null);
+    const liqSpikesArr   = snapshots.map(s => s.liq_spike).filter(v => v != null);
+    const latestLiqBias  = liqBiases.length    ? liqBiases[liqBiases.length - 1]       : null;
+    const latestLiqSpike = liqSpikesArr.length ? liqSpikesArr[liqSpikesArr.length - 1] : false;
+    const newsSentArr        = snapshots.map(s => s.news_sentiment).filter(v => v != null);
+    const latestNewsSentiment = newsSentArr.length ? newsSentArr[newsSentArr.length - 1] : null;
+    const latestNewsHeadline  = snapshots.map(s => s.news_headline).filter(v => v != null).slice(-1)[0] || null;
+
     if (name === "rex") {
       try {
         const lr = await fetch("http://localhost:5001/btcarb/rex-lessons", { signal: AbortSignal.timeout(3000) });
@@ -441,8 +465,6 @@ function useAgents(memory, apiKeys, btcPrice) {
       if (trendBearish) { downScore += 1; downVotes.push("trend↓"); if (upScore > downScore) upScore -= 1; }
 
       // 8. Taker buy/sell ratio — aggressive order flow (replaces raw volume signal where available)
-      const takerRatios = snapshots.map(s => s.taker_buy_ratio).filter(v => v != null);
-      const avgTakerBuy = takerRatios.length ? takerRatios.reduce((a,b)=>a+b,0)/takerRatios.length : null;
       if (avgTakerBuy !== null) {
         if      (avgTakerBuy > 0.58) { upScore   += 2; upVotes.push(`taker ${Math.round(avgTakerBuy*100)}%buy`); }
         else if (avgTakerBuy > 0.52) { upScore   += 1; upVotes.push(`taker ${Math.round(avgTakerBuy*100)}%buy`); }
@@ -451,42 +473,30 @@ function useAgents(memory, apiKeys, btcPrice) {
       }
 
       // 9. Long/Short ratio — crowded position signal
-      const lsRatios = snapshots.map(s => s.long_short_ratio).filter(v => v != null);
-      const avgLS    = lsRatios.length ? lsRatios.reduce((a,b)=>a+b,0)/lsRatios.length : null;
       if (avgLS !== null) {
         if      (avgLS > 1.4)  { downScore += 1; downVotes.push(`L/S ${avgLS.toFixed(2)} crowded longs`); }  // too many longs = flush risk
         else if (avgLS < 0.75) { upScore   += 1; upVotes.push(`L/S ${avgLS.toFixed(2)} crowded shorts`); }  // shorts getting squeezed
       }
 
       // 10. Perp basis — futures premium/discount vs spot
-      const basisVals = snapshots.map(s => s.basis_pct).filter(v => v != null);
-      const avgBasis  = basisVals.length ? basisVals.reduce((a,b)=>a+b,0)/basisVals.length : null;
       if (avgBasis !== null) {
         if      (avgBasis >  0.05) { upScore   += 1; upVotes.push(`basis+${avgBasis.toFixed(3)}%`); }   // perp premium = bullish futures flow
         else if (avgBasis < -0.05) { downScore += 1; downVotes.push(`basis${avgBasis.toFixed(3)}%`); }  // perp discount = bearish futures flow
       }
 
       // 11. 1hr price momentum
-      const momVals = snapshots.map(s => s.hourly_momentum).filter(v => v != null);
-      const avgMom  = momVals.length ? momVals.reduce((a,b)=>a+b,0)/momVals.length : null;
       if (avgMom !== null) {
         if      (avgMom >  0.3) { upScore   += 1; upVotes.push(`1h+${avgMom.toFixed(2)}%`); }
         else if (avgMom < -0.3) { downScore += 1; downVotes.push(`1h${avgMom.toFixed(2)}%`); }
       }
 
       // 12. Fear & Greed — macro sentiment contrarian signal
-      const fngVals = snapshots.map(s => s.fear_greed).filter(v => v != null);
-      const latestFG = fngVals.length ? fngVals[fngVals.length-1] : null;
       if (latestFG !== null) {
         if      (latestFG <= 20) { upScore   += 1; upVotes.push(`F&G=${latestFG} extremeFear`); }   // extreme fear = contrarian buy
         else if (latestFG >= 80) { downScore += 1; downVotes.push(`F&G=${latestFG} extremeGreed`); } // extreme greed = contrarian sell
       }
 
       // 14. Open Interest delta — growing OI amplifies the leading direction
-      const oiDeltas   = snapshots.map(s => s.oi_delta_pct).filter(v => v != null);
-      const avgOiDelta = oiDeltas.length ? oiDeltas.reduce((a,b)=>a+b,0)/oiDeltas.length : 0;
-      const oiGrowing  = avgOiDelta >  0.3;   // new positions opening — adds conviction to winner
-      const oiShrinking = avgOiDelta < -0.3;  // positions closing — reduces confidence (squeeze risk)
       if (oiGrowing) {
         // Boost whichever direction is already leading
         if (upScore >= downScore) { upScore   += 1; upVotes.push(`OI+${avgOiDelta.toFixed(2)}%`); }
@@ -499,10 +509,6 @@ function useAgents(memory, apiKeys, btcPrice) {
       }
 
       // 15. Liquidations — forced position closings create directional cascades
-      const liqBiases      = snapshots.map(s => s.liq_bias).filter(v => v != null);
-      const liqSpikesArr   = snapshots.map(s => s.liq_spike).filter(v => v != null);
-      const latestLiqBias  = liqBiases.length    ? liqBiases[liqBiases.length - 1]       : null;
-      const latestLiqSpike = liqSpikesArr.length ? liqSpikesArr[liqSpikesArr.length - 1] : false;
       if (latestLiqBias === "LONGS") {
         // Long liquidation cascade → forced selling → bearish pressure
         downScore += 2; downVotes.push(`liq LONGS${latestLiqSpike?" SPIKE":""}`);
@@ -514,9 +520,6 @@ function useAgents(memory, apiKeys, btcPrice) {
       }
 
       // 16. News sentiment — CoinTelegraph RSS keyword scoring (cached 5 min)
-      const newsSentArr        = snapshots.map(s => s.news_sentiment).filter(v => v != null);
-      const latestNewsSentiment = newsSentArr.length ? newsSentArr[newsSentArr.length - 1] : null;
-      const latestNewsHeadline  = snapshots.map(s => s.news_headline).filter(v => v != null).slice(-1)[0] || null;
       if      (latestNewsSentiment === "BULLISH") { upScore   += 1; upVotes.push(`news↑`); }
       else if (latestNewsSentiment === "BEARISH") { downScore += 1; downVotes.push(`news↓`); }
 
