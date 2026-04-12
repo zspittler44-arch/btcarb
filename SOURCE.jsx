@@ -415,11 +415,11 @@ function useAgents(memory, apiKeys, btcPrice) {
       if      (cvdBuyPct < 0.35) { downScore += 2; downVotes.push(`CVD ${Math.round((1-cvdBuyPct)*100)}% sell strong`); }
       else if (cvdBuyPct < 0.45) { downScore += 1; downVotes.push(`CVD ${Math.round((1-cvdBuyPct)*100)}% sell`); }
 
-      // 3. Net OB (0-2 pts)
-      if      (avgNetOB >  0.15) { upScore   += 2; upVotes.push(`OB +${avgNetOB.toFixed(3)}`); }
-      else if (avgNetOB >  0.05) { upScore   += 1; upVotes.push(`OB +${avgNetOB.toFixed(3)} mod`); }
-      if      (avgNetOB < -0.15) { downScore += 2; downVotes.push(`OB ${avgNetOB.toFixed(3)}`); }
-      else if (avgNetOB < -0.05) { downScore += 1; downVotes.push(`OB ${avgNetOB.toFixed(3)} mod`); }
+      // 3. Net OB (0-2 pts) — thresholds raised for OKX which has structural bid bias
+      if      (avgNetOB >  0.50) { upScore   += 2; upVotes.push(`OB +${avgNetOB.toFixed(3)}`); }
+      else if (avgNetOB >  0.20) { upScore   += 1; upVotes.push(`OB +${avgNetOB.toFixed(3)} mod`); }
+      if      (avgNetOB < -0.50) { downScore += 2; downVotes.push(`OB ${avgNetOB.toFixed(3)}`); }
+      else if (avgNetOB < -0.20) { downScore += 1; downVotes.push(`OB ${avgNetOB.toFixed(3)} mod`); }
 
       // 4. Volume imbalance (0-1 pt)
       if (volBullish) { upScore   += 1; upVotes.push(`vol ${Math.round(avgVolBuyPct*100)}%buy`); }
@@ -454,16 +454,22 @@ function useAgents(memory, apiKeys, btcPrice) {
       }
 
       // ── Thresholds ──
-      const MIN_SCORE  = 4;  // minimum total to fire
-      const HIGH_SCORE = 6;  // high confidence
-      const MARGIN     = 1;  // must lead opponent by at least this
+      // In CHOPPY/UNKNOWN trend, require higher score — noise is high
+      const IS_CHOPPY  = RESTRICTED_TRENDS.includes(actualTrend);
+      const MIN_SCORE  = IS_CHOPPY ? 6 : 4;  // choppy = 6, trending = 4
+      const HIGH_SCORE = IS_CHOPPY ? 8 : 6;
+      const MARGIN     = IS_CHOPPY ? 2 : 1;  // must lead by more in choppy
+
+      // Composite gate: at least ONE composite vote required to fire
+      // Without this, OB/CVD noise in sideways markets fires bad calls
+      const hasCompositeVote = bullPct >= 0.40 || bearPct >= 0.40;
 
       let aggDirection = "NEUTRAL";
       let aggConf = 45;
       let debugStr = `up=${upScore}[${upVotes.join(",")}] down=${downScore}[${downVotes.join(",")}]`;
 
-      const canUp   = upScore   >= MIN_SCORE && upScore   >= downScore + MARGIN;
-      const canDown = downScore >= MIN_SCORE && downScore >= upScore   + MARGIN;
+      const canUp   = hasCompositeVote && upScore   >= MIN_SCORE && upScore   >= downScore + MARGIN;
+      const canDown = hasCompositeVote && downScore >= MIN_SCORE && downScore >= upScore   + MARGIN;
 
       if (canUp && !canDown) {
         aggDirection = "UP";
@@ -486,7 +492,8 @@ function useAgents(memory, apiKeys, btcPrice) {
 
       const lastPredKey  = `rex_last_pred_${aggDirection}`;
       const lastPredTime = parseInt(sessionStorage.getItem(lastPredKey) || "0");
-      const isDuplicate  = aggDirection !== "NEUTRAL" && lastPredTime > Date.now() - 2 * 60 * 1000;
+      const dedupWindow  = aggDirection === "NEUTRAL" ? 5 * 60 * 1000 : 2 * 60 * 1000;
+      const isDuplicate  = lastPredTime > Date.now() - dedupWindow;
 
       setAgentStates(s => ({ ...s, rex: { ...s.rex, status: "done", lastSignal: aggSignal, confidence: aggConf } }));
       if (!isDuplicate) {
