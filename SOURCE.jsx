@@ -22,6 +22,7 @@ let _memStore = {
     gemini2:    (typeof import.meta !== "undefined" && import.meta.env?.VITE_GEMINI_KEY_2)   || "",
     gemini3:    (typeof import.meta !== "undefined" && import.meta.env?.VITE_GEMINI_KEY_3)   || "",
     gemini4:    (typeof import.meta !== "undefined" && import.meta.env?.VITE_GEMINI_KEY_4)   || "",
+    gemini5:    (typeof import.meta !== "undefined" && import.meta.env?.VITE_GEMINI_KEY_5)   || "",
     twilio:     (typeof import.meta !== "undefined" && import.meta.env?.VITE_TWILIO_KEY)     || "",
   },
   settings: { demoMode: false, demoScenario: "hot_arb", refreshInterval: 30 },
@@ -130,15 +131,17 @@ function useLivePrices(apiKeys, demoMode, demoScenario) {
       return;
     }
     try {
-      const res = await fetch("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true&include_24hr_vol=true&include_last_updated_at=true");
-      if (!res.ok) throw new Error(`CoinGecko ${res.status}`);
+      // Route through backend proxy — avoids CoinGecko browser rate limits
+      const res = await fetch("http://localhost:5001/btcarb/btc-price", { signal: AbortSignal.timeout(7000) });
+      if (!res.ok) throw new Error(`price proxy ${res.status}`);
       const d = await res.json();
+      if (d.error) throw new Error(d.error);
       setBtc({
-        usd: d.bitcoin.usd,
-        change24h: d.bitcoin.usd_24h_change,
+        usd: d.usd,
+        change24h: d.change24h,
         high24h: 0, low24h: 0,
         loading: false, error: null,
-        lastUpdated: d.bitcoin.last_updated_at * 1000,
+        lastUpdated: d.last_updated ? d.last_updated * 1000 : Date.now(),
       });
       setConnectionStatus(s => ({ ...s, coingecko: "live" }));
     } catch (e) {
@@ -255,6 +258,7 @@ function useAgents(memory, apiKeys, btcPrice) {
     nova:  { status: "idle", lastSignal: null, confidence: 0, task: "Sentiment Analysis" },
     rex:   { status: "idle", lastSignal: null, confidence: 0, task: "5-Min Direction Predictor" },
     sage:  { status: "idle", lastSignal: null, confidence: 0, task: "Risk Management" },
+    flux:  { status: "idle", lastSignal: null, confidence: 0, task: "Trading Intelligence" },
   });
 
   // Model assigned per agent for Groq — different models for performance comparison
@@ -263,6 +267,7 @@ function useAgents(memory, apiKeys, btcPrice) {
     nova:  "mixtral-8x7b-32768",        // different architecture for sentiment
     rex:   "llama-3.3-70b-versatile",   // needs 70B to follow structured format reliably
     sage:  "llama-3.3-70b-versatile",   // risk math needs depth
+    flux:  "llama-3.3-70b-versatile",   // trading intelligence — macro + flow synthesis
   };
 
   const callAI = useCallback(async (agentName, apiKey, prompt) => {
@@ -291,7 +296,7 @@ function useAgents(memory, apiKeys, btcPrice) {
   }, []);
 
   const runAgent = useCallback(async (name) => {
-    const key = apiKeys?.[`gemini${["atlas","nova","rex","sage"].indexOf(name)+1}`];
+    const key = apiKeys?.[`gemini${["atlas","nova","rex","sage","flux"].indexOf(name)+1}`];
     setAgentStates(s => ({ ...s, [name]: { ...s[name], status: "thinking" } }));
 
     // Fetch live microstructure data for Rex and Atlas
@@ -305,29 +310,242 @@ function useAgents(memory, apiKeys, btcPrice) {
       ? `OB imbalance:${lat.ob_imbalance ?? "n/a"} CVD:${lat.cvd_bias ?? "n/a"} Funding:${lat.funding_bias ?? "n/a"} Composite:${lat.composite ?? "n/a"} 2hr-trend:${micro.trend}.`
       : "Microstructure: unavailable.";
 
+    // Fetch Rex's live data-driven lessons before building his prompt
+    let rexLessons = "No historical data yet — default to NEUTRAL when signals are weak.";
+    let serverCooldownActive = false;
+    let serverCooldownMinutes = 0;
+    if (name === "rex") {
+      try {
+        const lr = await fetch("http://localhost:5001/btcarb/rex-lessons", { signal: AbortSignal.timeout(3000) });
+        const ld = await lr.json();
+        if (ld.lessons) rexLessons = ld.lessons;
+        serverCooldownActive  = ld.cooldown_active  || false;
+        serverCooldownMinutes = ld.cooldown_remaining_m || 0;
+        // If backend reports 3+ consecutive losses, trigger server-side cooldown
+        if ((ld.consecutive_losses || 0) >= 3 && !serverCooldownActive) {
+          fetch("http://localhost:5001/btcarb/rex-cooldown", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ minutes: 15 }),
+          }).catch(() => {});
+          serverCooldownActive  = true;
+          serverCooldownMinutes = 15;
+        }
+      } catch (_) {}
+    }
+
+    // ── Aggregate signal computation (used in both gate + Rex prompt) ─────────
+    const RESTRICTED_TRENDS = ["CHOPPY", "INSUFFICIENT_DATA", "UNKNOWN"];
+    const actualTrend  = micro?.trend || "UNKNOWN";
+    const snapshots    = micro?.snapshots || [];
+    const obMag        = Math.abs(lat.ob_imbalance || 0);
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // REX SIGNAL ENGINE v2  — 7-signal scored system
+    // Each signal votes with a weight. Fire when score >= 4 with clear margin.
+    // Replaces 4-binary-gate system that was producing 0% call rate in choppy markets.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    // 1. Composite consensus (12-snapshot directional agreement)
+    const composites   = snapshots.map(s => s.composite).filter(Boolean);
+    const bullPct      = composites.length ? composites.filter(c => c === "BULLISH").length / composites.length : 0;
+    const bearPct      = composites.length ? composites.filter(c => c === "BEARISH").length / composites.length : 0;
+    const hasConsensus = bullPct > 0.55 || bearPct > 0.55;  // kept for prompt display
+
+    // 2. Net OB average (12-snapshot mean)
+    const avgNetOB = snapshots.length
+      ? snapshots.reduce((sum, s) => sum + (s.ob_imbalance || 0), 0) / snapshots.length
+      : lat.ob_imbalance || 0;
+    const netOBNeutral = Math.abs(avgNetOB) < 0.08;
+
+    // 3. CVD consensus
+    const cvdVals   = snapshots.map(s => s.cvd_bias).filter(Boolean);
+    const cvdBuyPct = cvdVals.length ? cvdVals.filter(c => c === "BUY").length / cvdVals.length : 0.5;
+    const cvdConsensus = cvdBuyPct > 0.6 || cvdBuyPct < 0.4;
+
+    // 4. Volume imbalance — what % of actual traded volume was buy-side? (NEW)
+    const volRatios   = snapshots.map(s => { const t = (s.buy_vol||0)+(s.sell_vol||0); return t>0?(s.buy_vol||0)/t:null; }).filter(v=>v!==null);
+    const avgVolBuyPct = volRatios.length ? volRatios.reduce((a,b)=>a+b,0)/volRatios.length : 0.5;
+    const volBullish  = avgVolBuyPct > 0.54;  // majority of real trades are buys
+    const volBearish  = avgVolBuyPct < 0.46;
+
+    // 5. OB momentum — compare early vs recent snapshots (NEW)
+    const obVals      = snapshots.map(s => s.ob_imbalance || 0);
+    const midIdx      = Math.floor(obVals.length / 2);
+    const avgObEarly  = obVals.slice(0, midIdx).reduce((a,b)=>a+b,0) / (midIdx||1);
+    const avgObRecent = obVals.slice(midIdx).reduce((a,b)=>a+b,0) / (obVals.length-midIdx||1);
+    const obMomentumUp   = avgObRecent > avgObEarly + 0.04;
+    const obMomentumDown = avgObRecent < avgObEarly - 0.04;
+
+    // 6. Funding bias — shorts/longs paying across snapshots (NEW)
+    const fundingVals  = snapshots.map(s => s.funding_bias).filter(Boolean);
+    const fundBullPct  = fundingVals.length ? fundingVals.filter(f=>f==="SHORTS_PAYING").length/fundingVals.length : 0.5;
+    const fundBearPct  = fundingVals.length ? fundingVals.filter(f=>f==="LONGS_PAYING").length/fundingVals.length  : 0.5;
+    const fundingBullish = fundBullPct >= 0.5;
+    const fundingBearish = fundBearPct >  0.5;
+
+    // 7. Trend
+    const trendBullish = actualTrend === "TRENDING_UP";
+    const trendBearish = actualTrend === "TRENDING_DOWN";
+
+    if (name === "rex") {
+      // ── Loss streak cooldown ──────────────────────────────────────────────
+      if (serverCooldownActive) {
+        const coolSignal = `NEUTRAL — Loss streak cooldown active (${serverCooldownMinutes.toFixed(0)} min remaining). Sitting out to protect the record.`;
+        setAgentStates(s => ({ ...s, rex: { ...s.rex, status: "done", lastSignal: coolSignal, confidence: 0 } }));
+        setTimeout(() => setAgentStates(s => ({ ...s, rex: { ...s.rex, status: "idle" } })), 5000);
+        return { signal: coolSignal, confidence: 0 };
+      }
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // SCORED SIGNAL ENGINE — each signal votes with a weight
+      // UP/DOWN must reach MIN_SCORE with at least MARGIN lead to fire.
+      // ═══════════════════════════════════════════════════════════════════════
+      let upScore = 0, downScore = 0;
+      const upVotes = [], downVotes = [];
+
+      // 1. Composite (0-2 pts each direction)
+      if      (bullPct > 0.55)  { upScore   += 2; upVotes.push(`composite ${Math.round(bullPct*100)}%B`); }
+      else if (bullPct >= 0.40) { upScore   += 1; upVotes.push(`composite soft ${Math.round(bullPct*100)}%B`); }
+      if      (bearPct > 0.55)  { downScore += 2; downVotes.push(`composite ${Math.round(bearPct*100)}%Br`); }
+      else if (bearPct >= 0.40) { downScore += 1; downVotes.push(`composite soft ${Math.round(bearPct*100)}%Br`); }
+
+      // 2. CVD (0-2 pts)
+      if      (cvdBuyPct > 0.65) { upScore   += 2; upVotes.push(`CVD ${Math.round(cvdBuyPct*100)}% strong`); }
+      else if (cvdBuyPct > 0.55) { upScore   += 1; upVotes.push(`CVD ${Math.round(cvdBuyPct*100)}%`); }
+      if      (cvdBuyPct < 0.35) { downScore += 2; downVotes.push(`CVD ${Math.round((1-cvdBuyPct)*100)}% sell strong`); }
+      else if (cvdBuyPct < 0.45) { downScore += 1; downVotes.push(`CVD ${Math.round((1-cvdBuyPct)*100)}% sell`); }
+
+      // 3. Net OB (0-2 pts)
+      if      (avgNetOB >  0.15) { upScore   += 2; upVotes.push(`OB +${avgNetOB.toFixed(3)}`); }
+      else if (avgNetOB >  0.05) { upScore   += 1; upVotes.push(`OB +${avgNetOB.toFixed(3)} mod`); }
+      if      (avgNetOB < -0.15) { downScore += 2; downVotes.push(`OB ${avgNetOB.toFixed(3)}`); }
+      else if (avgNetOB < -0.05) { downScore += 1; downVotes.push(`OB ${avgNetOB.toFixed(3)} mod`); }
+
+      // 4. Volume imbalance (0-1 pt)
+      if (volBullish) { upScore   += 1; upVotes.push(`vol ${Math.round(avgVolBuyPct*100)}%buy`); }
+      if (volBearish) { downScore += 1; downVotes.push(`vol ${Math.round((1-avgVolBuyPct)*100)}%sell`); }
+
+      // 5. OB momentum (0-1 pt)
+      if (obMomentumUp)   { upScore   += 1; upVotes.push("OB↑accel"); }
+      if (obMomentumDown) { downScore += 1; downVotes.push("OB↓decel"); }
+
+      // 6. Funding (0-1 pt)
+      if (fundingBullish) { upScore   += 1; upVotes.push("funding↑"); }
+      if (fundingBearish) { downScore += 1; downVotes.push("funding↓"); }
+
+      // 7. Trend boost/penalty (±1 pt)
+      if (trendBullish) { upScore += 1; upVotes.push("trend↑"); if (downScore > upScore) downScore -= 1; }
+      if (trendBearish) { downScore += 1; downVotes.push("trend↓"); if (upScore > downScore) upScore -= 1; }
+
+      // ── Thresholds ──
+      const MIN_SCORE  = 4;  // minimum total to fire
+      const HIGH_SCORE = 6;  // high confidence
+      const MARGIN     = 1;  // must lead opponent by at least this
+
+      let aggDirection = "NEUTRAL";
+      let aggConf = 45;
+      let debugStr = `up=${upScore}[${upVotes.join(",")}] down=${downScore}[${downVotes.join(",")}]`;
+
+      const canUp   = upScore   >= MIN_SCORE && upScore   >= downScore + MARGIN;
+      const canDown = downScore >= MIN_SCORE && downScore >= upScore   + MARGIN;
+
+      if (canUp && !canDown) {
+        aggDirection = "UP";
+        aggConf = upScore >= HIGH_SCORE ? 60 : 54;
+      } else if (canDown && !canUp) {
+        aggDirection = "DOWN";
+        aggConf = downScore >= HIGH_SCORE ? 62 : 56;
+      }
+
+      const aggSignal = aggDirection !== "NEUTRAL"
+        ? `${aggDirection} — Score ${aggDirection==="UP"?upScore:downScore}/9. `
+          + `Composite ${Math.round(bullPct*100)}%B/${Math.round(bearPct*100)}%Bear, `
+          + `OB=${avgNetOB.toFixed(3)}${obMomentumUp?" ↑accel":obMomentumDown?" ↓decel":""}, `
+          + `CVD=${Math.round(cvdBuyPct*100)}%BUY, vol=${Math.round(avgVolBuyPct*100)}%buy, `
+          + `funding=${fundingBullish?"↑":"↓"}, trend=${actualTrend}. `
+          + `Votes: [${(aggDirection==="UP"?upVotes:downVotes).join(", ")}]`
+        : `NEUTRAL — Insufficient conviction. ${debugStr}. `
+          + `Composite ${Math.round(bullPct*100)}%B/${Math.round(bearPct*100)}%Bear, `
+          + `OB=${avgNetOB.toFixed(3)}, CVD=${Math.round(cvdBuyPct*100)}%BUY`;
+
+      const lastPredKey  = `rex_last_pred_${aggDirection}`;
+      const lastPredTime = parseInt(sessionStorage.getItem(lastPredKey) || "0");
+      const isDuplicate  = aggDirection !== "NEUTRAL" && lastPredTime > Date.now() - 2 * 60 * 1000;
+
+      setAgentStates(s => ({ ...s, rex: { ...s.rex, status: "done", lastSignal: aggSignal, confidence: aggConf } }));
+      if (!isDuplicate) {
+        sessionStorage.setItem(lastPredKey, String(Date.now()));
+        fetch("http://localhost:5001/btcarb/rex-predict", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ signal: aggSignal, confidence: aggConf, price: btcPrice?.usd || null }),
+        }).catch(() => {});
+      }
+      setTimeout(() => setAgentStates(s => ({ ...s, rex: { ...s.rex, status: "idle" } })), 5000);
+      return { signal: aggSignal, confidence: aggConf };
+    }
+
+    // ── Agent prompts (built after all gate variables are ready) ──────────────
     const prompts = {
-      atlas: `BTC price: $${btcPrice?.usd?.toFixed(0) || "N/A"}. ${microSummary} Analyze market structure and 4h trend. Give a 1-sentence directional signal with confidence 0-100.`,
-      nova:  `BTC at $${btcPrice?.usd?.toFixed(0) || "N/A"}, 24h change ${btcPrice?.change24h?.toFixed(2) || "0"}%. ${microSummary} Analyze current sentiment and flow signals. Give 1-sentence signal with confidence 0-100.`,
-      rex:   `You are Rex. Your ONLY job is predicting BTC price direction for the next 5 minutes.\n\nDATA: BTC $${btcPrice?.usd?.toFixed(0) || "N/A"}. ${microSummary}\n\nWhat you have learned from your wins and losses:\n- You WIN when multiple signals strongly agree AND price is already moving with momentum\n- You LOSE when you force a call on weak or mixed signals — tiny price moves that could go either way\n- Call NEUTRAL when signals conflict OR when momentum is weak — do not guess on noise\n- Only call UP or DOWN when OB imbalance, CVD, and composite all point the same direction\n- High confidence means nothing if the signals are not aligned\n\nRules:\n- Respond in EXACTLY this 3-line format, nothing else\n- Do NOT mention Kalshi, Polymarket, or arbitrage\n\nExample output:\nDIRECTION: UP\nCONFIDENCE: 78\nREASON: OB imbalance bullish, CVD trending up, composite aligned`,
-      sage:  `Portfolio has ${memory?.trades?.filter(t=>t.status==="open")?.length || 0} open positions. BTC $${btcPrice?.usd?.toFixed(0) || "N/A"}. ${microSummary} Give risk assessment and max safe position size. 1 sentence, confidence 0-100.`,
+      atlas: `You are ATLAS, a BTC market structure analyst. Analyze BTC market structure in ONE sentence. Current microstructure: ${microSummary} Respond with just the market structure insight (max 120 chars).`,
+      nova:  `You are NOVA, a crypto sentiment analyst. Analyze current BTC sentiment in ONE sentence. Respond with just the sentiment insight (max 120 chars).`,
+rex: `You are REX, a BTC 5-minute directional predictor. The scored signal engine has already run. Your job: validate and confirm the direction using your full context.
+
+CURRENT MARKET DATA (system-verified, do not contradict):
+- 2hr trend: ${actualTrend}
+- Composite: ${Math.round(bullPct*100)}%B / ${Math.round(bearPct*100)}%Bear (${composites.length} snapshots)
+- Net OB avg: ${avgNetOB.toFixed(3)}${obMomentumUp?" ↑ACCELERATING":obMomentumDown?" ↓DECELERATING":""}
+- CVD buy pressure: ${Math.round(cvdBuyPct*100)}%
+- Volume buy ratio: ${Math.round(avgVolBuyPct*100)}% of volume is buy-side
+- Funding: ${fundingBullish?"SHORTS PAYING (bullish pressure)":"LONGS PAYING (bearish pressure)"}
+- Latest snapshot: ${microSummary}
+- FLUX market view: ${agentStates?.flux?.lastSignal || "unavailable"}
+
+YOUR HISTORICAL WIN PROFILE:
+${rexLessons}
+
+DECISION FRAMEWORK:
+1. TREND IS LAW: If trend=TRENDING_DOWN, require overwhelming buy evidence (CVD>70%, OB>0.20) to call UP. Otherwise DOWN or NEUTRAL.
+2. VOLUME CONFIRMS: If volume buy ratio <50%, buying in the order book is not backed by real trades — weight down UP confidence.
+3. OB MOMENTUM MATTERS: Accelerating OB (↑) is stronger than flat OB. If OB is decelerating toward zero, lean NEUTRAL.
+4. FUNDING AS TIEBREAKER: When composite and CVD disagree, funding direction breaks the tie.
+5. CONVICTION THRESHOLD: Only call UP/DOWN if you can articulate a specific reason. "Signals are mixed" = NEUTRAL.
+
+Respond EXACTLY in this format (no other text):
+DIRECTION: UP|DOWN|NEUTRAL
+CONFIDENCE: 50-80
+REASON: one sentence citing the strongest signal`,
+      sage: `You are SAGE, a crypto risk manager. Analyze current risk and recommended BTC exposure in ONE sentence. Current microstructure: ${microSummary} Respond with just the risk assessment (max 120 chars).`,
+      flux: `You are FLUX, a trading intelligence specialist. Synthesize the macro picture for BTC right now in ONE sentence — consider order flow, momentum, and any structural bias. Current microstructure: ${microSummary} Respond with just your trading intelligence brief (max 120 chars).`,
     };
+
     const result = await callAI(name, key, prompts[name]);
     const demoSignals = {
       atlas: { signal: "BTC holding key $65K support — structure bullish above $66.5K.", confidence: 74 },
       nova:  { signal: "Social sentiment turning positive, fear index dropping from 42 → 38.", confidence: 61 },
       rex:   { signal: "3.8% spread on BTC-70K-EOY between Kalshi (62%) and Polymarket (58%).", confidence: 82 },
       sage:  { signal: "Portfolio risk nominal. Max recommended exposure: $850 at current vol.", confidence: 88 },
+      flux:  { signal: "Order flow neutral — no strong macro bias. Watch for break of local range.", confidence: 55 },
     };
     let parsed;
     if (result) {
       // For Rex: parse structured DIRECTION/CONFIDENCE/REASON format
-      const dirMatch = result.match(/DIRECTION:\s*(UP|DOWN|NEUTRAL)/i);
+      const dirMatch  = result.match(/DIRECTION:\s*(UP|DOWN|NEUTRAL)/i);
       const confMatch = result.match(/CONFIDENCE:\s*(\d+)/i);
       const reasonMatch = result.match(/REASON:\s*(.+)/i);
       if (name === "rex" && dirMatch) {
-        const direction = dirMatch[1].toUpperCase();
-        const confidence = confMatch ? parseInt(confMatch[1]) : Math.floor(Math.random() * 30) + 60;
-        const reason = reasonMatch ? reasonMatch[1].trim() : result.substring(0, 80);
+        let direction  = dirMatch[1].toUpperCase();
+        let confidence = confMatch ? parseInt(confMatch[1]) : Math.floor(Math.random() * 30) + 60;
+        let reason     = reasonMatch ? reasonMatch[1].trim() : result.substring(0, 80);
+
+        // ── Post-call fabrication check ───────────────────────────────────────
+        // If Rex claimed a trending label but actual trend is restricted, override.
+        const claimedTrending = /TRENDING_UP|TRENDING_DOWN|TRENDING/i.test(reason + result);
+        if (RESTRICTED_TRENDS.includes(actualTrend) && claimedTrending && direction !== "NEUTRAL") {
+          direction  = "NEUTRAL";
+          confidence = 0;
+          reason     = `Fabrication detected — Rex claimed trending but actual trend is ${actualTrend}. Overriding to NEUTRAL.`;
+        }
+
         parsed = { signal: `${direction} — ${reason}`, confidence };
       } else {
         parsed = { signal: result.substring(0, 120), confidence: Math.floor(Math.random() * 30) + 60 };
@@ -336,17 +554,24 @@ function useAgents(memory, apiKeys, btcPrice) {
       parsed = demoSignals[name];
     }
     setAgentStates(s => ({ ...s, [name]: { ...s[name], status: "done", lastSignal: parsed.signal, confidence: parsed.confidence } }));
-    // Rex logs every prediction so we can build win/loss data
+    // Rex logs every prediction — with 2-min dedup cooldown to prevent duplicate logging
     if (name === "rex") {
-      fetch("http://localhost:5001/btcarb/rex-predict", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          signal:     parsed.signal,
-          confidence: parsed.confidence,
-          price:      btcPrice?.usd || null,
-        }),
-      }).catch(() => {});
+      const rexDir = (parsed.signal.match(/^(UP|DOWN|NEUTRAL)/i) || [])[1]?.toUpperCase() || "NEUTRAL";
+      const rexKey = `rex_last_pred_${rexDir}`;
+      const lastT  = parseInt(sessionStorage.getItem(rexKey) || "0");
+      const isDup  = rexDir !== "NEUTRAL" && lastT > Date.now() - 2 * 60 * 1000;
+      if (!isDup) {
+        sessionStorage.setItem(rexKey, String(Date.now()));
+        fetch("http://localhost:5001/btcarb/rex-predict", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            signal:     parsed.signal,
+            confidence: parsed.confidence,
+            price:      btcPrice?.usd || null,
+          }),
+        }).catch(() => {});
+      }
     }
     setTimeout(() => setAgentStates(s => ({ ...s, [name]: { ...s[name], status: "idle" } })), 5000);
     return parsed;
@@ -357,7 +582,7 @@ function useAgents(memory, apiKeys, btcPrice) {
   useEffect(() => { agentsRef.current = { runAgent, apiKeys, btcPrice }; }, [runAgent, apiKeys, btcPrice]);
 
   useEffect(() => {
-    const names = ["atlas", "nova", "rex", "sage"];
+    const names = ["atlas", "nova", "rex", "sage", "flux"];
 
     const runAll = () => {
       const { runAgent, apiKeys } = agentsRef.current;
@@ -502,10 +727,23 @@ function RexPredictionPanel() {
     <div className={S.card} style={{ height: "100%" }}>
       <div className="flex items-center justify-between mb-3">
         <div className="text-gray-300 font-semibold text-sm">REX PREDICTIONS</div>
-        <a href="http://localhost:5001/btcarb/rex-report" target="_blank" rel="noreferrer"
-           className="text-xs bg-gray-800 hover:bg-gray-700 text-blue-400 px-2 py-1 rounded transition-colors">
-          ↓ Excel
-        </a>
+        <div className="flex gap-2">
+          <a href="http://localhost:5001/btcarb/rex-report" target="_blank" rel="noreferrer"
+             className="text-xs bg-gray-800 hover:bg-gray-700 text-blue-400 px-2 py-1 rounded transition-colors">
+            ↓ Excel
+          </a>
+          <button
+            className="text-xs bg-gray-800 hover:bg-red-900 text-red-400 px-2 py-1 rounded transition-colors"
+            onClick={() => {
+              if (!window.confirm("Clear all of Rex's prediction history? This cannot be undone.")) return;
+              fetch("http://localhost:5001/btcarb/rex-clear", { method: "POST" })
+                .then(r => r.json())
+                .then(() => { setData(null); setLoading(true); setTimeout(() => window.location.reload(), 500); })
+                .catch(() => alert("Clear failed — is the backend running?"));
+            }}>
+            ✕ Clear
+          </button>
+        </div>
       </div>
 
       {loading && <div className="text-gray-600 text-xs py-2">Loading...</div>}
@@ -619,6 +857,7 @@ function FrontOffice({ btc, kalshiMarkets, positions, alerts, agentStates, runAg
             { name: "nova",  color: "purple", icon: "🌟", label: "NOVA" },
             { name: "rex",   color: "green",  icon: "🦾", label: "REX" },
             { name: "sage",  color: "yellow", icon: "🧠", label: "SAGE" },
+            { name: "flux",  color: "cyan",   icon: "⚡", label: "FLUX" },
           ].map(({ name, color, icon, label }) => {
             const a = agentStates[name];
             return (
@@ -1046,6 +1285,7 @@ function SetupTab({ memory, setMemory }) {
     { key: "gemini2", label: "AI Key — Nova", hint: "Groq: console.groq.com → Create API Key (free, mixtral-8x7b)", placeholder: "gsk_..." },
     { key: "gemini3", label: "AI Key — Rex", hint: "Groq: console.groq.com → Create API Key (free, llama-3.1-8b)", placeholder: "gsk_..." },
     { key: "gemini4", label: "AI Key — Sage", hint: "Groq: console.groq.com → Create API Key (free, llama-3.3-70b)", placeholder: "gsk_..." },
+    { key: "gemini5", label: "AI Key — Flux", hint: "Groq: console.groq.com → Create API Key (free, llama-3.3-70b)", placeholder: "gsk_..." },
     { key: "twilio", label: "Twilio Auth Token", hint: "console.twilio.com → Account → API Keys", placeholder: "AC..." },
   ];
 
@@ -1137,7 +1377,7 @@ function HealthTab({ memory, connectionStatus, btc }) {
     { name: "Polymarket Connection", status: connectionStatus.polymarket, detail: connectionStatus.polymarket === "no_key" ? "Add key in Setup" : "Connected" },
     { name: "Memory Store", status: "live", detail: `${memory.trades.length} trades · ${memory.signals.length} signals · ${memory.rules.length} rules` },
     { name: "Rules Engine", status: memory.rules.filter(r => r.active).length > 0 ? "live" : "no_key", detail: `${memory.rules.filter(r => r.active).length}/${memory.rules.length} active` },
-    { name: "API Keys", status: Object.values(memory.apiKeys || {}).filter(Boolean).length > 0 ? "live" : "no_key", detail: `${Object.values(memory.apiKeys || {}).filter(Boolean).length}/8 configured` },
+    { name: "API Keys", status: Object.values(memory.apiKeys || {}).filter(Boolean).length > 0 ? "live" : "no_key", detail: `${Object.values(memory.apiKeys || {}).filter(Boolean).length}/9 configured` },
   ];
 
   return (
@@ -1225,7 +1465,7 @@ export default function App() {
 
   // Auto-run agents every 5 minutes, staggered 30s apart — stable, never restarts
   useEffect(() => {
-    const AGENTS = ["atlas", "nova", "rex", "sage"];
+    const AGENTS = ["atlas", "nova", "rex", "sage", "flux"];
     const INTERVAL = 5 * 60 * 1000;
     const STAGGER = 30 * 1000;
     const timeouts = AGENTS.map((name, i) =>
