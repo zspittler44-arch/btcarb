@@ -437,7 +437,49 @@ function useAgents(memory, apiKeys, btcPrice) {
       if (trendBullish) { upScore += 1; upVotes.push("trend↑"); if (downScore > upScore) downScore -= 1; }
       if (trendBearish) { downScore += 1; downVotes.push("trend↓"); if (upScore > downScore) upScore -= 1; }
 
-      // 8. Open Interest delta — growing OI amplifies the leading direction (NEW)
+      // 8. Taker buy/sell ratio — aggressive order flow (replaces raw volume signal where available)
+      const takerRatios = snapshots.map(s => s.taker_buy_ratio).filter(v => v != null);
+      const avgTakerBuy = takerRatios.length ? takerRatios.reduce((a,b)=>a+b,0)/takerRatios.length : null;
+      if (avgTakerBuy !== null) {
+        if      (avgTakerBuy > 0.58) { upScore   += 2; upVotes.push(`taker ${Math.round(avgTakerBuy*100)}%buy`); }
+        else if (avgTakerBuy > 0.52) { upScore   += 1; upVotes.push(`taker ${Math.round(avgTakerBuy*100)}%buy`); }
+        if      (avgTakerBuy < 0.42) { downScore += 2; downVotes.push(`taker ${Math.round((1-avgTakerBuy)*100)}%sell`); }
+        else if (avgTakerBuy < 0.48) { downScore += 1; downVotes.push(`taker ${Math.round((1-avgTakerBuy)*100)}%sell`); }
+      }
+
+      // 9. Long/Short ratio — crowded position signal
+      const lsRatios = snapshots.map(s => s.long_short_ratio).filter(v => v != null);
+      const avgLS    = lsRatios.length ? lsRatios.reduce((a,b)=>a+b,0)/lsRatios.length : null;
+      if (avgLS !== null) {
+        if      (avgLS > 1.4)  { downScore += 1; downVotes.push(`L/S ${avgLS.toFixed(2)} crowded longs`); }  // too many longs = flush risk
+        else if (avgLS < 0.75) { upScore   += 1; upVotes.push(`L/S ${avgLS.toFixed(2)} crowded shorts`); }  // shorts getting squeezed
+      }
+
+      // 10. Perp basis — futures premium/discount vs spot
+      const basisVals = snapshots.map(s => s.basis_pct).filter(v => v != null);
+      const avgBasis  = basisVals.length ? basisVals.reduce((a,b)=>a+b,0)/basisVals.length : null;
+      if (avgBasis !== null) {
+        if      (avgBasis >  0.05) { upScore   += 1; upVotes.push(`basis+${avgBasis.toFixed(3)}%`); }   // perp premium = bullish futures flow
+        else if (avgBasis < -0.05) { downScore += 1; downVotes.push(`basis${avgBasis.toFixed(3)}%`); }  // perp discount = bearish futures flow
+      }
+
+      // 11. 1hr price momentum
+      const momVals = snapshots.map(s => s.hourly_momentum).filter(v => v != null);
+      const avgMom  = momVals.length ? momVals.reduce((a,b)=>a+b,0)/momVals.length : null;
+      if (avgMom !== null) {
+        if      (avgMom >  0.3) { upScore   += 1; upVotes.push(`1h+${avgMom.toFixed(2)}%`); }
+        else if (avgMom < -0.3) { downScore += 1; downVotes.push(`1h${avgMom.toFixed(2)}%`); }
+      }
+
+      // 12. Fear & Greed — macro sentiment contrarian signal
+      const fngVals = snapshots.map(s => s.fear_greed).filter(v => v != null);
+      const latestFG = fngVals.length ? fngVals[fngVals.length-1] : null;
+      if (latestFG !== null) {
+        if      (latestFG <= 20) { upScore   += 1; upVotes.push(`F&G=${latestFG} extremeFear`); }   // extreme fear = contrarian buy
+        else if (latestFG >= 80) { downScore += 1; downVotes.push(`F&G=${latestFG} extremeGreed`); } // extreme greed = contrarian sell
+      }
+
+      // 14. Open Interest delta — growing OI amplifies the leading direction
       const oiDeltas   = snapshots.map(s => s.oi_delta_pct).filter(v => v != null);
       const avgOiDelta = oiDeltas.length ? oiDeltas.reduce((a,b)=>a+b,0)/oiDeltas.length : 0;
       const oiGrowing  = avgOiDelta >  0.3;   // new positions opening — adds conviction to winner
@@ -456,9 +498,9 @@ function useAgents(memory, apiKeys, btcPrice) {
       // ── Thresholds ──
       // In CHOPPY/UNKNOWN trend, require higher score — noise is high
       const IS_CHOPPY  = RESTRICTED_TRENDS.includes(actualTrend);
-      const MIN_SCORE  = IS_CHOPPY ? 6 : 4;  // choppy = 6, trending = 4
-      const HIGH_SCORE = IS_CHOPPY ? 8 : 6;
-      const MARGIN     = IS_CHOPPY ? 2 : 1;  // must lead by more in choppy
+      const MIN_SCORE  = IS_CHOPPY ? 7 : 5;   // max 16pts — choppy = 7, trending = 5
+      const HIGH_SCORE = IS_CHOPPY ? 10 : 8;  // high confidence threshold
+      const MARGIN     = IS_CHOPPY ? 2 : 1;   // must lead by more in choppy
 
       // Composite gate: at least ONE composite vote required to fire
       // Without this, OB/CVD noise in sideways markets fires bad calls
@@ -480,15 +522,18 @@ function useAgents(memory, apiKeys, btcPrice) {
       }
 
       const aggSignal = aggDirection !== "NEUTRAL"
-        ? `${aggDirection} — Score ${aggDirection==="UP"?upScore:downScore}/10. `
+        ? `${aggDirection} — Score ${aggDirection==="UP"?upScore:downScore}/16. `
           + `Composite ${Math.round(bullPct*100)}%B/${Math.round(bearPct*100)}%Bear, `
           + `OB=${avgNetOB.toFixed(3)}${obMomentumUp?" ↑accel":obMomentumDown?" ↓decel":""}, `
-          + `CVD=${Math.round(cvdBuyPct*100)}%BUY, vol=${Math.round(avgVolBuyPct*100)}%buy, `
+          + `CVD=${Math.round(cvdBuyPct*100)}%BUY, taker=${avgTakerBuy!==null?Math.round(avgTakerBuy*100)+"%" :"n/a"}, `
+          + `L/S=${avgLS!==null?avgLS.toFixed(2):"n/a"}, basis=${avgBasis!==null?avgBasis.toFixed(3)+"%":"n/a"}, `
+          + `1h=${avgMom!==null?avgMom.toFixed(2)+"%":"n/a"}, F&G=${latestFG??"n/a"}, `
           + `funding=${fundingBullish?"↑":"↓"}, OI${avgOiDelta>=0?"+":""}${avgOiDelta.toFixed(2)}%, trend=${actualTrend}. `
           + `Votes: [${(aggDirection==="UP"?upVotes:downVotes).join(", ")}]`
         : `NEUTRAL — Insufficient conviction. ${debugStr}. `
           + `Composite ${Math.round(bullPct*100)}%B/${Math.round(bearPct*100)}%Bear, `
-          + `OB=${avgNetOB.toFixed(3)}, CVD=${Math.round(cvdBuyPct*100)}%BUY, OI${avgOiDelta>=0?"+":""}${avgOiDelta.toFixed(2)}%`;
+          + `OB=${avgNetOB.toFixed(3)}, CVD=${Math.round(cvdBuyPct*100)}%BUY, `
+          + `taker=${avgTakerBuy!==null?Math.round(avgTakerBuy*100)+"%":"n/a"}, F&G=${latestFG??"n/a"}`;
 
       const lastPredKey  = `rex_last_pred_${aggDirection}`;
       const lastPredTime = parseInt(sessionStorage.getItem(lastPredKey) || "0");
@@ -521,6 +566,11 @@ CURRENT MARKET DATA (system-verified, do not contradict):
 - Volume buy ratio: ${Math.round(avgVolBuyPct*100)}% of volume is buy-side
 - Funding: ${fundingBullish?"SHORTS PAYING (bullish pressure)":"LONGS PAYING (bearish pressure)"}
 - Open Interest delta: ${avgOiDelta>=0?"+":""}${avgOiDelta.toFixed(2)}% ${oiGrowing?"(new positions opening — conviction)":oiShrinking?"(positions closing — squeeze risk)":"(stable)"}
+- Taker buy ratio: ${avgTakerBuy!==null?Math.round(avgTakerBuy*100)+"%":"n/a"} of aggressive orders are buys (>58% = strong buy pressure)
+- Long/Short ratio: ${avgLS!==null?avgLS.toFixed(2):"n/a"} (>1.4 = crowded longs = flush risk, <0.75 = crowded shorts = squeeze risk)
+- Perp basis: ${avgBasis!==null?avgBasis.toFixed(3)+"%":"n/a"} (positive = futures premium = bullish, negative = futures discount = bearish)
+- 1hr price momentum: ${avgMom!==null?avgMom.toFixed(2)+"%":"n/a"}
+- Fear & Greed index: ${latestFG??"n/a"}/100 (≤20 = extreme fear = contrarian buy, ≥80 = extreme greed = contrarian sell)
 - Latest snapshot: ${microSummary}
 - FLUX market view: ${agentStates?.flux?.lastSignal || "unavailable"}
 
