@@ -315,29 +315,6 @@ function useAgents(memory, apiKeys, btcPrice) {
     let serverCooldownActive = false;
     let serverCooldownMinutes = 0;
 
-    // ── Hoisted signal variables (needed by prompts for all agents) ──────
-    const takerRatios = snapshots.map(s => s.taker_buy_ratio).filter(v => v != null);
-    const avgTakerBuy = takerRatios.length ? takerRatios.reduce((a,b)=>a+b,0)/takerRatios.length : null;
-    const lsRatios = snapshots.map(s => s.long_short_ratio).filter(v => v != null);
-    const avgLS    = lsRatios.length ? lsRatios.reduce((a,b)=>a+b,0)/lsRatios.length : null;
-    const basisVals = snapshots.map(s => s.basis_pct).filter(v => v != null);
-    const avgBasis  = basisVals.length ? basisVals.reduce((a,b)=>a+b,0)/basisVals.length : null;
-    const momVals = snapshots.map(s => s.hourly_momentum).filter(v => v != null);
-    const avgMom  = momVals.length ? momVals.reduce((a,b)=>a+b,0)/momVals.length : null;
-    const fngVals = snapshots.map(s => s.fear_greed).filter(v => v != null);
-    const latestFG = fngVals.length ? fngVals[fngVals.length-1] : null;
-    const oiDeltas   = snapshots.map(s => s.oi_delta_pct).filter(v => v != null);
-    const avgOiDelta = oiDeltas.length ? oiDeltas.reduce((a,b)=>a+b,0)/oiDeltas.length : 0;
-    const oiGrowing  = avgOiDelta >  0.3;
-    const oiShrinking = avgOiDelta < -0.3;
-    const liqBiases      = snapshots.map(s => s.liq_bias).filter(v => v != null);
-    const liqSpikesArr   = snapshots.map(s => s.liq_spike).filter(v => v != null);
-    const latestLiqBias  = liqBiases.length    ? liqBiases[liqBiases.length - 1]       : null;
-    const latestLiqSpike = liqSpikesArr.length ? liqSpikesArr[liqSpikesArr.length - 1] : false;
-    const newsSentArr        = snapshots.map(s => s.news_sentiment).filter(v => v != null);
-    const latestNewsSentiment = newsSentArr.length ? newsSentArr[newsSentArr.length - 1] : null;
-    const latestNewsHeadline  = snapshots.map(s => s.news_headline).filter(v => v != null).slice(-1)[0] || null;
-
     if (name === "rex") {
       try {
         const lr = await fetch("http://localhost:5001/btcarb/rex-lessons", { signal: AbortSignal.timeout(3000) });
@@ -413,6 +390,30 @@ function useAgents(memory, apiKeys, btcPrice) {
     // 7. Trend
     const trendBullish = actualTrend === "TRENDING_UP";
     const trendBearish = actualTrend === "TRENDING_DOWN";
+
+    // ── Hoisted signal variables (needed by prompts for all agents) ──────
+    const takerRatios = snapshots.map(s => s.taker_buy_ratio).filter(v => v != null);
+    const avgTakerBuy = takerRatios.length ? takerRatios.reduce((a,b)=>a+b,0)/takerRatios.length : null;
+    const lsRatios = snapshots.map(s => s.long_short_ratio).filter(v => v != null);
+    const avgLS    = lsRatios.length ? lsRatios.reduce((a,b)=>a+b,0)/lsRatios.length : null;
+    const basisVals = snapshots.map(s => s.basis_pct).filter(v => v != null);
+    const avgBasis  = basisVals.length ? basisVals.reduce((a,b)=>a+b,0)/basisVals.length : null;
+    const momVals = snapshots.map(s => s.hourly_momentum).filter(v => v != null);
+    const avgMom  = momVals.length ? momVals.reduce((a,b)=>a+b,0)/momVals.length : null;
+    const fngVals = snapshots.map(s => s.fear_greed).filter(v => v != null);
+    const latestFG = fngVals.length ? fngVals[fngVals.length-1] : null;
+    const oiDeltas   = snapshots.map(s => s.oi_delta_pct).filter(v => v != null);
+    const avgOiDelta = oiDeltas.length ? oiDeltas.reduce((a,b)=>a+b,0)/oiDeltas.length : 0;
+    const oiGrowing  = avgOiDelta >  0.3;
+    const oiShrinking = avgOiDelta < -0.3;
+    const liqBiases      = snapshots.map(s => s.liq_bias).filter(v => v != null);
+    const liqSpikesArr   = snapshots.map(s => s.liq_spike).filter(v => v != null);
+    const latestLiqBias  = liqBiases.length    ? liqBiases[liqBiases.length - 1]       : null;
+    const latestLiqSpike = liqSpikesArr.length ? liqSpikesArr[liqSpikesArr.length - 1] : false;
+    const newsSentArr        = snapshots.map(s => s.news_sentiment).filter(v => v != null);
+    const latestNewsSentiment = newsSentArr.length ? newsSentArr[newsSentArr.length - 1] : null;
+    const latestNewsHeadline  = snapshots.map(s => s.news_headline).filter(v => v != null).slice(-1)[0] || null;
+
 
     if (name === "rex") {
       // ── Loss streak cooldown ──────────────────────────────────────────────
