@@ -437,6 +437,22 @@ function useAgents(memory, apiKeys, btcPrice) {
       if (trendBullish) { upScore += 1; upVotes.push("trend↑"); if (downScore > upScore) downScore -= 1; }
       if (trendBearish) { downScore += 1; downVotes.push("trend↓"); if (upScore > downScore) upScore -= 1; }
 
+      // 8. Open Interest delta — growing OI amplifies the leading direction (NEW)
+      const oiDeltas   = snapshots.map(s => s.oi_delta_pct).filter(v => v != null);
+      const avgOiDelta = oiDeltas.length ? oiDeltas.reduce((a,b)=>a+b,0)/oiDeltas.length : 0;
+      const oiGrowing  = avgOiDelta >  0.3;   // new positions opening — adds conviction to winner
+      const oiShrinking = avgOiDelta < -0.3;  // positions closing — reduces confidence (squeeze risk)
+      if (oiGrowing) {
+        // Boost whichever direction is already leading
+        if (upScore >= downScore) { upScore   += 1; upVotes.push(`OI+${avgOiDelta.toFixed(2)}%`); }
+        else                      { downScore += 1; downVotes.push(`OI+${avgOiDelta.toFixed(2)}%`); }
+      }
+      if (oiShrinking) {
+        // Bleed both — closing positions = less directional conviction
+        upScore   = Math.max(0, upScore   - 1);
+        downScore = Math.max(0, downScore - 1);
+      }
+
       // ── Thresholds ──
       const MIN_SCORE  = 4;  // minimum total to fire
       const HIGH_SCORE = 6;  // high confidence
@@ -458,15 +474,15 @@ function useAgents(memory, apiKeys, btcPrice) {
       }
 
       const aggSignal = aggDirection !== "NEUTRAL"
-        ? `${aggDirection} — Score ${aggDirection==="UP"?upScore:downScore}/9. `
+        ? `${aggDirection} — Score ${aggDirection==="UP"?upScore:downScore}/10. `
           + `Composite ${Math.round(bullPct*100)}%B/${Math.round(bearPct*100)}%Bear, `
           + `OB=${avgNetOB.toFixed(3)}${obMomentumUp?" ↑accel":obMomentumDown?" ↓decel":""}, `
           + `CVD=${Math.round(cvdBuyPct*100)}%BUY, vol=${Math.round(avgVolBuyPct*100)}%buy, `
-          + `funding=${fundingBullish?"↑":"↓"}, trend=${actualTrend}. `
+          + `funding=${fundingBullish?"↑":"↓"}, OI${avgOiDelta>=0?"+":""}${avgOiDelta.toFixed(2)}%, trend=${actualTrend}. `
           + `Votes: [${(aggDirection==="UP"?upVotes:downVotes).join(", ")}]`
         : `NEUTRAL — Insufficient conviction. ${debugStr}. `
           + `Composite ${Math.round(bullPct*100)}%B/${Math.round(bearPct*100)}%Bear, `
-          + `OB=${avgNetOB.toFixed(3)}, CVD=${Math.round(cvdBuyPct*100)}%BUY`;
+          + `OB=${avgNetOB.toFixed(3)}, CVD=${Math.round(cvdBuyPct*100)}%BUY, OI${avgOiDelta>=0?"+":""}${avgOiDelta.toFixed(2)}%`;
 
       const lastPredKey  = `rex_last_pred_${aggDirection}`;
       const lastPredTime = parseInt(sessionStorage.getItem(lastPredKey) || "0");
@@ -497,6 +513,7 @@ CURRENT MARKET DATA (system-verified, do not contradict):
 - CVD buy pressure: ${Math.round(cvdBuyPct*100)}%
 - Volume buy ratio: ${Math.round(avgVolBuyPct*100)}% of volume is buy-side
 - Funding: ${fundingBullish?"SHORTS PAYING (bullish pressure)":"LONGS PAYING (bearish pressure)"}
+- Open Interest delta: ${avgOiDelta>=0?"+":""}${avgOiDelta.toFixed(2)}% ${oiGrowing?"(new positions opening — conviction)":oiShrinking?"(positions closing — squeeze risk)":"(stable)"}
 - Latest snapshot: ${microSummary}
 - FLUX market view: ${agentStates?.flux?.lastSignal || "unavailable"}
 
