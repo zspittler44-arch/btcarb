@@ -688,25 +688,34 @@ REASON: one sentence citing the strongest signal`,
   const agentsRef = useRef({ runAgent, apiKeys, btcPrice });
   useEffect(() => { agentsRef.current = { runAgent, apiKeys, btcPrice }; }, [runAgent, apiKeys, btcPrice]);
 
+  // Track whether agents have had their first run
+  const hasBootedRef = useRef(false);
+
+  // React to key changes — if keys arrive and agents haven't booted, run immediately
   useEffect(() => {
     const names = ["atlas", "nova", "rex", "sage", "flux"];
+    const hasKey = names.some((_, i) => apiKeys?.[`gemini${i + 1}`]);
+    if (hasKey && !hasBootedRef.current) {
+      hasBootedRef.current = true;
+      names.forEach((name, i) => {
+        setTimeout(() => agentsRef.current.runAgent(name), i * 4000);
+      });
+    }
+  }, [apiKeys]);
 
+  useEffect(() => {
+    const names = ["atlas", "nova", "rex", "sage", "flux"];
     const runAll = () => {
       const { runAgent, apiKeys } = agentsRef.current;
-      // Only auto-run if at least one AI key is configured (Groq gsk_... or Gemini AIza...)
-      const hasKey = names.some((n, i) => apiKeys?.[`gemini${i + 1}`]);
+      const hasKey = names.some((_, i) => apiKeys?.[`gemini${i + 1}`]);
       if (!hasKey) return;
+      hasBootedRef.current = true;
       names.forEach((name, i) => {
-        setTimeout(() => runAgent(name), i * 4000); // stagger 4s apart
+        setTimeout(() => runAgent(name), i * 4000);
       });
     };
-
-    // First run after 5s (gives key-load time to settle)
-    const initial = setTimeout(runAll, 5000);
-    // Then every 5 minutes
     const interval = setInterval(runAll, 5 * 60 * 1000);
-
-    return () => { clearTimeout(initial); clearInterval(interval); };
+    return () => { clearInterval(interval); };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   return { agentStates, runAgent };
