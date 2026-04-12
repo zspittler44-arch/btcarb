@@ -322,10 +322,13 @@ function useAgents(memory, apiKeys, btcPrice) {
         serverCooldownActive  = ld.cooldown_active  || false;
         serverCooldownMinutes = ld.cooldown_remaining_m || 0;
         // If backend reports 3+ consecutive losses, trigger server-side cooldown
-        if ((ld.consecutive_losses || 0) >= 3 && !serverCooldownActive) {
+        // Only fire ONCE per streak — check if cooldown was already set for this streak count
+        const currentStreak = ld.consecutive_losses || 0;
+        const alreadyFiredForStreak = (ld.cooldown_streak_count || 0) >= currentStreak && currentStreak > 0;
+        if (currentStreak >= 3 && !serverCooldownActive && !alreadyFiredForStreak) {
           fetch("http://localhost:5001/btcarb/rex-cooldown", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ minutes: 15 }),
+            body: JSON.stringify({ minutes: 15, streak_count: currentStreak }),
           }).catch(() => {});
           serverCooldownActive  = true;
           serverCooldownMinutes = 15;
@@ -520,9 +523,9 @@ function useAgents(memory, apiKeys, btcPrice) {
       // ── Thresholds ──
       // In CHOPPY/UNKNOWN trend, require higher score — noise is high
       const IS_CHOPPY  = RESTRICTED_TRENDS.includes(actualTrend);
-      const MIN_SCORE  = IS_CHOPPY ? 6 : 5;   // max 18pts — choppy = 6, trending = 5
-      const HIGH_SCORE = IS_CHOPPY ? 9 : 8;   // high confidence threshold
-      const MARGIN     = IS_CHOPPY ? 2 : 1;   // must lead by more in choppy
+      const MIN_SCORE  = IS_CHOPPY ? 8 : 6;   // max 18pts — raised: choppy = 8, trending = 6 (was 6/5)
+      const HIGH_SCORE = IS_CHOPPY ? 11 : 9;  // high confidence threshold — raised (was 9/8)
+      const MARGIN     = IS_CHOPPY ? 3 : 2;   // must lead by more in choppy — raised (was 2/1)
 
       // Composite gate: at least ONE composite vote required to fire
       // Without this, OB/CVD noise in sideways markets fires bad calls
