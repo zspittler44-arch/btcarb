@@ -605,7 +605,7 @@ CURRENT MARKET DATA (system-verified, do not contradict):
 - Liquidation bias: ${latestLiqBias??"none"} ${latestLiqSpike?"⚡SPIKE (>10 BTC liquidated in 2min — strong cascade pressure)":"(low liq activity)"} (LONGS liq'd = bearish cascade, SHORTS liq'd = bullish short squeeze)
 - News sentiment: ${latestNewsSentiment??"n/a"} ${latestNewsHeadline?`— "${latestNewsHeadline}"`:""}
 - Latest snapshot: ${microSummary}
-- FLUX market view: ${agentStates?.flux?.lastSignal || "unavailable"}
+- FLUX Kalshi BTC analysis: ${agentStates?.flux?.lastSignal || "unavailable"}
 
 YOUR HISTORICAL WIN PROFILE:
 ${rexLessons}
@@ -622,7 +622,18 @@ DIRECTION: UP|DOWN|NEUTRAL
 CONFIDENCE: 50-80
 REASON: one sentence citing the strongest signal`,
       sage: `You are SAGE, a crypto risk manager. Analyze current risk and recommended BTC exposure in ONE sentence. Current microstructure: ${microSummary} Respond with just the risk assessment (max 120 chars).`,
-      flux: `You are FLUX, a trading intelligence specialist. Synthesize the macro picture for BTC right now in ONE sentence — consider order flow, momentum, and any structural bias. Current microstructure: ${microSummary} Respond with just your trading intelligence brief (max 120 chars).`,
+      flux: (() => {
+        const km = kalshiMarkets || [];
+        const activeContracts = km.filter(m => m.bid > 0 || m.vol > 0);
+        const topByBid = [...km].sort((a,b) => b.bid - a.bid).slice(0, 5);
+        const topByVol = [...km].sort((a,b) => b.vol - a.vol).filter(m => m.vol > 0).slice(0, 5);
+        const kalshiSummary = activeContracts.length > 0
+          ? `ACTIVE CONTRACTS (${activeContracts.length}):\n`
+            + topByBid.map(m => `  ${m.subtitle}: bid=$${m.bid.toFixed(2)} ask=$${m.ask.toFixed(2)} vol=${m.vol}`).join(`\n`)
+            + (topByVol.length > 0 ? `\nTOP VOLUME:\n` + topByVol.map(m => `  ${m.subtitle}: vol=${m.vol} mid=$${m.kalshi.toFixed(3)}`).join(`\n`) : ``)
+          : `No active Kalshi BTC contracts right now (market may be closed).`;
+        return `You are FLUX, the Kalshi BTC Monitor. Analyze live Kalshi BTC prediction market contracts and report where the market is pricing BTC direction.\n\nLIVE KALSHI DATA (KXBTC series):\n${kalshiSummary}\n\nTotal contracts: ${km.length} | Current BTC spot: $${btcPrice?.usd || `n/a`}\nMicrostructure: ${microSummary}\n\nIdentify the price range where Kalshi traders concentrate bids, whether Kalshi implies UP/DOWN/NEUTRAL vs spot, and flag high-volume contracts. If no contracts active, fall back to microstructure. Respond in ONE sentence, max 150 chars.`;
+      })(),
     };
 
     const result = await callAI(name, key, prompts[name]);
@@ -685,8 +696,8 @@ REASON: one sentence citing the strongest signal`,
   }, [apiKeys, btcPrice, memory, callAI]);
 
   // Auto-run all agents on mount and every 15 minutes
-  const agentsRef = useRef({ runAgent, apiKeys, btcPrice });
-  useEffect(() => { agentsRef.current = { runAgent, apiKeys, btcPrice }; }, [runAgent, apiKeys, btcPrice]);
+  const agentsRef = useRef({ runAgent, apiKeys, btcPrice, kalshiMarkets });
+  useEffect(() => { agentsRef.current = { runAgent, apiKeys, btcPrice, kalshiMarkets }; }, [runAgent, apiKeys, btcPrice, kalshiMarkets]);
 
   // Track whether agents have had their first run
   const hasBootedRef = useRef(false);
