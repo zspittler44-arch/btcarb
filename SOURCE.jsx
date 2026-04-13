@@ -693,7 +693,7 @@ REASON: one sentence citing the strongest signal`,
     }
     setTimeout(() => setAgentStates(s => ({ ...s, [name]: { ...s[name], status: "idle" } })), 5000);
     return parsed;
-  }, [apiKeys, btcPrice, memory, callAI]);
+  }, [apiKeys, btcPrice, memory, callAI, kalshiMarkets]);
 
   // Auto-run all agents on mount and every 15 minutes
   const agentsRef = useRef({ runAgent, apiKeys, btcPrice, kalshiMarkets });
