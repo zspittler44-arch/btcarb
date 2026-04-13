@@ -568,7 +568,7 @@ function useAgents(memory, apiKeys, btcPrice) {
 
       const lastPredKey  = `rex_last_pred_${aggDirection}`;
       const lastPredTime = parseInt(sessionStorage.getItem(lastPredKey) || "0");
-      const dedupWindow  = aggDirection === "NEUTRAL" ? 5 * 60 * 1000 : 2 * 60 * 1000;
+      const dedupWindow  = aggDirection === "NEUTRAL" ? 15 * 60 * 1000 : 5 * 60 * 1000;
       const isDuplicate  = lastPredTime > Date.now() - dedupWindow;
 
       setAgentStates(s => ({ ...s, rex: { ...s.rex, status: "done", lastSignal: aggSignal, confidence: aggConf } }));
@@ -587,7 +587,7 @@ function useAgents(memory, apiKeys, btcPrice) {
     const prompts = {
       atlas: `You are ATLAS, a BTC market structure analyst. Analyze BTC market structure in ONE sentence. Current microstructure: ${microSummary} Respond with just the market structure insight (max 120 chars).`,
       nova:  `You are NOVA, a crypto sentiment analyst. Analyze current BTC sentiment in ONE sentence. Respond with just the sentiment insight (max 120 chars).`,
-rex: `You are REX, a BTC 5-minute directional predictor. The scored signal engine has already run. Your job: validate and confirm the direction using your full context.
+rex: `You are REX, a BTC 15-minute directional predictor. The scored signal engine has already run. Your job: validate and confirm the direction using your full context.
 
 CURRENT MARKET DATA (system-verified, do not contradict):
 - 2hr trend: ${actualTrend}
@@ -684,7 +684,7 @@ REASON: one sentence citing the strongest signal`,
     return parsed;
   }, [apiKeys, btcPrice, memory, callAI]);
 
-  // Auto-run all agents on mount and every 5 minutes
+  // Auto-run all agents on mount and every 15 minutes
   const agentsRef = useRef({ runAgent, apiKeys, btcPrice });
   useEffect(() => { agentsRef.current = { runAgent, apiKeys, btcPrice }; }, [runAgent, apiKeys, btcPrice]);
 
@@ -714,7 +714,7 @@ REASON: one sentence citing the strongest signal`,
         setTimeout(() => runAgent(name), i * 4000);
       });
     };
-    const interval = setInterval(runAll, 5 * 60 * 1000);
+    const interval = setInterval(runAll, 15 * 60 * 1000);
     return () => { clearInterval(interval); };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -883,7 +883,7 @@ function RexPredictionPanel() {
           {/* Recent resolved calls */}
           {recent.length === 0 ? (
             <div className="text-gray-600 text-xs text-center py-2">
-              {data.total > 0 ? "Awaiting first resolution (5 min)…" : "No predictions yet — click Rex › Run"}
+              {data.total > 0 ? "Awaiting first resolution (15 min)…" : "No predictions yet — click Rex › Run"}
             </div>
           ) : recent.map((p, i) => (
             <div key={i} className="flex items-center justify-between mb-1 text-xs">
@@ -1579,10 +1579,10 @@ export default function App() {
     setMemory(m => ({ ...m, settings: { ...m.settings, demoMode, demoScenario } }));
   }, [demoMode, demoScenario, setMemory]);
 
-  // Auto-run agents every 5 minutes, staggered 30s apart — stable, never restarts
+  // Auto-run agents every 15 minutes, staggered 30s apart — stable, never restarts
   useEffect(() => {
     const AGENTS = ["atlas", "nova", "rex", "sage", "flux"];
-    const INTERVAL = 5 * 60 * 1000;
+    const INTERVAL = 15 * 60 * 1000;
     const STAGGER = 30 * 1000;
     const timeouts = AGENTS.map((name, i) =>
       setTimeout(() => runAgentRef.current(name), i * STAGGER)
