@@ -159,8 +159,8 @@ function useLivePrices(apiKeys, demoMode, demoScenario) {
       const d = await res.json();
       if (d.error === "no_key") { setConnectionStatus(s => ({ ...s, kalshi: "no_key" })); return; }
       const markets = (d.markets || []).map(m => ({
-        id: m.id, title: m.title,
-        kalshi: m.kalshi,
+        id: m.id, title: m.title, subtitle: m.subtitle,
+        bid: m.bid, ask: m.ask, kalshi: m.kalshi,
         poly: null, spread: null, vol: m.vol,
       }));
       setKalshiMarkets(markets);
@@ -256,9 +256,9 @@ function useAgents(memory, apiKeys, btcPrice, kalshiMarkets) {
   const [agentStates, setAgentStates] = useState({
     atlas: { status: "idle", lastSignal: null, confidence: 0, task: "Market Structure" },
     nova:  { status: "idle", lastSignal: null, confidence: 0, task: "Sentiment Analysis" },
-    rex:   { status: "idle", lastSignal: null, confidence: 0, task: "5-Min Direction Predictor" },
+    rex:   { status: "idle", lastSignal: null, confidence: 0, task: "15-Min Direction Predictor" },
     sage:  { status: "idle", lastSignal: null, confidence: 0, task: "Risk Management" },
-    flux:  { status: "idle", lastSignal: null, confidence: 0, task: "Trading Intelligence" },
+    flux:  { status: "idle", lastSignal: null, confidence: 0, task: "Kalshi BTC Monitor" },
   });
 
   // Model assigned per agent for Groq — different models for performance comparison
