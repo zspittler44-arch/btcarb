@@ -93,6 +93,7 @@ function useSystemMemory() {
 function useLivePrices(apiKeys, demoMode, demoScenario) {
   const [btc, setBtc] = useState({ usd: 0, change24h: 0, high24h: 0, low24h: 0, loading: true, error: null, lastUpdated: null });
   const [kalshiMarkets, setKalshiMarkets] = useState([]);
+  const [kalshiHistory, setKalshiHistory] = useState([]);
   const [polyMarkets, setPolyMarkets] = useState([]);
   const [connectionStatus, setConnectionStatus] = useState({ coingecko: "connecting", kalshi: "no_key", polymarket: "no_key" });
 
@@ -161,9 +162,11 @@ function useLivePrices(apiKeys, demoMode, demoScenario) {
       const markets = (d.markets || []).map(m => ({
         id: m.id, title: m.title, subtitle: m.subtitle,
         bid: m.bid, ask: m.ask, kalshi: m.kalshi,
+        target: m.target, close_time: m.close_time, open_time: m.open_time,
         poly: null, spread: null, vol: m.vol,
       }));
       setKalshiMarkets(markets);
+      if (d.history) setKalshiHistory(d.history);
       setConnectionStatus(s => ({ ...s, kalshi: markets.length > 0 ? "live" : "error" }));
     } catch (e) {
       setConnectionStatus(s => ({ ...s, kalshi: "error" }));
@@ -199,7 +202,7 @@ function useLivePrices(apiKeys, demoMode, demoScenario) {
 
   useEffect(() => { fetchPolymarket(); }, [fetchPolymarket]);
 
-  return { btc, kalshiMarkets, polyMarkets, connectionStatus, refetch: { fetchBTC, fetchKalshi, fetchPolymarket } };
+  return { btc, kalshiMarkets, kalshiHistory, polyMarkets, connectionStatus, refetch: { fetchBTC, fetchKalshi, fetchPolymarket } };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -252,7 +255,7 @@ function useAlerts(memory, setMemory) {
 // ═══════════════════════════════════════════════════════════════════════════
 // HOOK: useAgents — Atlas, Nova, Rex, Sage
 // ═══════════════════════════════════════════════════════════════════════════
-function useAgents(memory, apiKeys, btcPrice, kalshiMarkets) {
+function useAgents(memory, apiKeys, btcPrice, kalshiMarkets, kalshiHistory) {
   const [agentStates, setAgentStates] = useState({
     atlas: { status: "idle", lastSignal: null, confidence: 0, task: "Market Structure" },
     nova:  { status: "idle", lastSignal: null, confidence: 0, task: "Sentiment Analysis" },
@@ -624,15 +627,30 @@ REASON: one sentence citing the strongest signal`,
       sage: `You are SAGE, a crypto risk manager. Analyze current risk and recommended BTC exposure in ONE sentence. Current microstructure: ${microSummary} Respond with just the risk assessment (max 120 chars).`,
       flux: (() => {
         const km = kalshiMarkets || [];
-        const activeContracts = km.filter(m => m.bid > 0 || m.vol > 0);
-        const topByBid = [...km].sort((a,b) => b.bid - a.bid).slice(0, 5);
-        const topByVol = [...km].sort((a,b) => b.vol - a.vol).filter(m => m.vol > 0).slice(0, 5);
-        const kalshiSummary = activeContracts.length > 0
-          ? `ACTIVE CONTRACTS (${activeContracts.length}):\n`
-            + topByBid.map(m => `  ${m.subtitle}: bid=$${m.bid.toFixed(2)} ask=$${m.ask.toFixed(2)} vol=${m.vol}`).join(`\n`)
-            + (topByVol.length > 0 ? `\nTOP VOLUME:\n` + topByVol.map(m => `  ${m.subtitle}: vol=${m.vol} mid=$${m.kalshi.toFixed(3)}`).join(`\n`) : ``)
-          : `No active Kalshi BTC contracts right now (market may be closed).`;
-        return `You are FLUX, the Kalshi BTC Monitor. Analyze live Kalshi BTC prediction market contracts and report where the market is pricing BTC direction.\n\nLIVE KALSHI DATA (KXBTC series):\n${kalshiSummary}\n\nTotal contracts: ${km.length} | Current BTC spot: $${btcPrice?.usd || `n/a`}\nMicrostructure: ${microSummary}\n\nIdentify the price range where Kalshi traders concentrate bids, whether Kalshi implies UP/DOWN/NEUTRAL vs spot, and flag high-volume contracts. If no contracts active, fall back to microstructure. Respond in ONE sentence, max 150 chars.`;
+        const hist = kalshiHistory || [];
+        const spot = btcPrice?.usd || 0;
+        // Find contracts with activity
+        const active = km.filter(m => m.bid > 0 || m.vol > 0);
+        // Find the contract closest to current BTC price (most relevant for direction)
+        const withTarget = km.filter(m => m.target > 0);
+        const nearest = withTarget.length > 0
+          ? withTarget.reduce((a, b) => Math.abs(a.target - spot) < Math.abs(b.target - spot) ? a : b)
+          : null;
+        // Top contracts by volume
+        const topVol = [...km].sort((a,b) => b.vol - a.vol).filter(m => m.vol > 0).slice(0, 5);
+        // Build current snapshot
+        const currentData = nearest
+          ? `NEAREST CONTRACT: ${nearest.subtitle} | target=$${nearest.target.toFixed(2)} | bid=$${nearest.bid.toFixed(2)} ask=$${nearest.ask.toFixed(2)} vol=${nearest.vol}\n  BTC spot=$${spot.toFixed(2)} → ${spot > nearest.target ? "ABOVE target (Up favored)" : spot < nearest.target ? "BELOW target (Down favored)" : "AT target"} | gap=${Math.abs(spot - nearest.target).toFixed(2)}`
+          : `No contracts with target prices found.`;
+        const volSummary = topVol.length > 0
+          ? `TOP VOLUME:\n` + topVol.map(m => `  ${m.subtitle}: vol=${m.vol} bid=$${m.bid.toFixed(2)} target=$${m.target > 0 ? m.target.toFixed(2) : "?"}`).join(`\n`)
+          : ``;
+        // Build price history trend
+        const histSummary = hist.length > 1
+          ? `PRICE HISTORY (${hist.length} snapshots):\n` + hist.slice(-10).map(h => `  ${h.ts?.split("T")[1]?.split(".")[0] || "?"} | ${h.subtitle} mid=$${h.mid?.toFixed(3) || "?"} vol=${h.vol}`).join(`\n`)
+            + `\n  Trend: mid went from $${hist[0].mid?.toFixed(3)} → $${hist[hist.length-1].mid?.toFixed(3)} (${hist[hist.length-1].mid > hist[0].mid ? "RISING" : hist[hist.length-1].mid < hist[0].mid ? "FALLING" : "FLAT"})`
+          : `No price history yet (accumulating snapshots).`;
+        return `You are FLUX, the Kalshi BTC Monitor. You watch KXBTC 15-minute prediction market contracts to tell Rex where smart money is pricing BTC direction.\n\nCURRENT BTC: $${spot.toFixed(2)}\n${currentData}\n${volSummary}\n${histSummary}\nActive contracts: ${active.length} of ${km.length} total\n\nYour job: (1) Is the prediction market pricing BTC UP, DOWN, or NEUTRAL for the next 15 min? (2) How confident is the market (volume + spread)? (3) Is the trend shifting?\nRespond in ONE sentence, max 150 chars. Start with UP/DOWN/NEUTRAL and cite the key Kalshi signal.`;
       })(),
     };
 
@@ -693,11 +711,11 @@ REASON: one sentence citing the strongest signal`,
     }
     setTimeout(() => setAgentStates(s => ({ ...s, [name]: { ...s[name], status: "idle" } })), 5000);
     return parsed;
-  }, [apiKeys, btcPrice, memory, callAI, kalshiMarkets]);
+  }, [apiKeys, btcPrice, memory, callAI, kalshiMarkets, kalshiHistory]);
 
   // Auto-run all agents on mount and every 15 minutes
-  const agentsRef = useRef({ runAgent, apiKeys, btcPrice, kalshiMarkets });
-  useEffect(() => { agentsRef.current = { runAgent, apiKeys, btcPrice, kalshiMarkets }; }, [runAgent, apiKeys, btcPrice, kalshiMarkets]);
+  const agentsRef = useRef({ runAgent, apiKeys, btcPrice, kalshiMarkets, kalshiHistory });
+  useEffect(() => { agentsRef.current = { runAgent, apiKeys, btcPrice, kalshiMarkets, kalshiHistory }; }, [runAgent, apiKeys, btcPrice, kalshiMarkets, kalshiHistory]);
 
   // Track whether agents have had their first run
   const hasBootedRef = useRef(false);
@@ -1576,10 +1594,10 @@ export default function App() {
   const [demoScenario, setDemoScenario] = useState(_memStore.settings.demoScenario);
   const [office, setOffice] = useState("front");
 
-  const { btc, kalshiMarkets, polyMarkets, connectionStatus } = useLivePrices(memory.apiKeys, demoMode, demoScenario);
+  const { btc, kalshiMarkets, kalshiHistory, polyMarkets, connectionStatus } = useLivePrices(memory.apiKeys, demoMode, demoScenario);
   const { positions, closedTrades, totalPnL, openPosition, closePosition } = usePositions(memory, setMemory, btc.usd);
   const { alerts, unreadCount, addAlert, markRead, clearAlerts } = useAlerts(memory, setMemory);
-  const { agentStates, runAgent } = useAgents(memory, memory.apiKeys, btc, kalshiMarkets);
+  const { agentStates, runAgent } = useAgents(memory, memory.apiKeys, btc, kalshiMarkets, kalshiHistory);
 
   // Keep a stable ref to runAgent so auto-run intervals don't reset on every BTC price tick
   const runAgentRef = useRef(runAgent);
