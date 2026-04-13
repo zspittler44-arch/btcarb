@@ -252,7 +252,7 @@ function useAlerts(memory, setMemory) {
 // ═══════════════════════════════════════════════════════════════════════════
 // HOOK: useAgents — Atlas, Nova, Rex, Sage
 // ═══════════════════════════════════════════════════════════════════════════
-function useAgents(memory, apiKeys, btcPrice) {
+function useAgents(memory, apiKeys, btcPrice, kalshiMarkets) {
   const [agentStates, setAgentStates] = useState({
     atlas: { status: "idle", lastSignal: null, confidence: 0, task: "Market Structure" },
     nova:  { status: "idle", lastSignal: null, confidence: 0, task: "Sentiment Analysis" },
@@ -1579,7 +1579,7 @@ export default function App() {
   const { btc, kalshiMarkets, polyMarkets, connectionStatus } = useLivePrices(memory.apiKeys, demoMode, demoScenario);
   const { positions, closedTrades, totalPnL, openPosition, closePosition } = usePositions(memory, setMemory, btc.usd);
   const { alerts, unreadCount, addAlert, markRead, clearAlerts } = useAlerts(memory, setMemory);
-  const { agentStates, runAgent } = useAgents(memory, memory.apiKeys, btc);
+  const { agentStates, runAgent } = useAgents(memory, memory.apiKeys, btc, kalshiMarkets);
 
   // Keep a stable ref to runAgent so auto-run intervals don't reset on every BTC price tick
   const runAgentRef = useRef(runAgent);
